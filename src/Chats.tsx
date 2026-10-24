@@ -6,6 +6,8 @@ import { Avatar, Badges, OnlineContext, fmtChatTime, fmtClock, lastSeenText, use
 type Row = { conversation_id: string; other_id: string; last_body: string | null; last_at: string | null; last_sender: string | null; unread: number };
 type Msg = { id: number; conversation_id: string; sender_id: string; body: string; created_at: string };
 const PAGE = 40;
+// Слияние по id: без дублей и в стабильном порядке (id растёт вместе с вставкой)
+const mergeMsgs = (a: Msg[], b: Msg[]) => { const m = new Map<number, Msg>(); [...a, ...b].forEach((x) => m.set(x.id, x)); return [...m.values()].sort((x, y) => x.id - y.id); };
 
 export default function Chats({ me, chatId, setChatId, nav }: { me: Profile; chatId: string | null; setChatId: (id: string | null) => void; nav: Nav }) {
   const [rows, setRows] = useState<Row[]>([]);
@@ -14,13 +16,13 @@ export default function Chats({ me, chatId, setChatId, nav }: { me: Profile; cha
   const [q, setQ] = useState("");
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [msgState, setMsgState] = useState<"loading" | "ready" | "error">("loading");
-  const [older, setOlder] = useState(false);
+  const [older, setOlder] = useState(false), [olderLoading, setOlderLoading] = useState(false);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [sendErr, setSendErr] = useState<string | null>(null);
   const openRef = useRef(chatId), peersRef = useRef(peers), timer = useRef(0);
   const box = useRef<HTMLDivElement>(null), ta = useRef<HTMLTextAreaElement>(null);
-  const atBottom = useRef(true), prevH = useRef<number | null>(null);
+  const atBottom = useRef(true), prevS = useRef<{ top: number; h: number } | null>(null), olderBusy = useRef(false);
   const baseId = useRef(0), online = useContext(OnlineContext);
   openRef.current = chatId; peersRef.current = peers;
 
@@ -53,7 +55,7 @@ export default function Chats({ me, chatId, setChatId, nav }: { me: Profile; cha
     const ch = supabase.channel("msgs-" + me.id).on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, (payload) => {
       const m = payload.new as Msg;
       if (m.conversation_id === openRef.current) {
-        setMsgs((p) => (p.some((x) => x.id === m.id) ? p : [...p, m]));
+        setMsgs((p) => mergeMsgs(p, [m]));
         if (m.sender_id !== me.id) markRead(m.conversation_id);
       }
       refreshSoon();
@@ -62,16 +64,17 @@ export default function Chats({ me, chatId, setChatId, nav }: { me: Profile; cha
   }, [me.id, markRead, refreshSoon]);
 
   useEffect(() => {
-    setDraft(""); setSendErr(null); setMsgs([]); setOlder(false);
+    setDraft(""); setSendErr(null); setMsgs([]); setOlder(false); olderBusy.current = false; setOlderLoading(false);
     if (!chatId) return;
     let dead = false; atBottom.current = true; setMsgState("loading");
     if (!rows.some((r) => r.conversation_id === chatId)) loadList();
-    supabase.from("messages").select("*").eq("conversation_id", chatId).order("created_at", { ascending: false }).limit(PAGE).then(({ data, error }) => {
+    supabase.from("messages").select("*").eq("conversation_id", chatId).order("id", { ascending: false }).limit(PAGE).then(({ data, error }) => {
       if (dead) return;
       if (error) return setMsgState("error");
       const list = ((data ?? []) as Msg[]).reverse();
       baseId.current = list.length ? list[list.length - 1].id : 0;
-      setMsgs(list); setOlder((data ?? []).length === PAGE); setMsgState("ready");
+      // сообщения, пришедшие по Realtime во время загрузки, не теряются: объединяем с историей
+      setMsgs((cur) => mergeMsgs(list, cur)); setOlder((data ?? []).length === PAGE); setMsgState("ready");
       markRead(chatId);
     });
     return () => { dead = true; };
@@ -80,17 +83,21 @@ export default function Chats({ me, chatId, setChatId, nav }: { me: Profile; cha
 
   useLayoutEffect(() => {
     const el = box.current; if (!el) return;
-    if (prevH.current !== null) { el.scrollTop = el.scrollHeight - prevH.current; prevH.current = null; }
+    if (prevS.current) { el.scrollTop = prevS.current.top + (el.scrollHeight - prevS.current.h); prevS.current = null; }
     else if (atBottom.current) el.scrollTop = el.scrollHeight;
   }, [msgs, msgState]);
   useEffect(() => { const el = ta.current; if (el) { el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight, 140) + "px"; } }, [draft]);
 
   async function loadOlder() {
-    if (!chatId || !msgs.length) return;
-    const { data, error } = await supabase.from("messages").select("*").eq("conversation_id", chatId).lt("created_at", msgs[0].created_at).order("created_at", { ascending: false }).limit(PAGE);
-    if (error) return;
-    prevH.current = box.current?.scrollHeight ?? 0;
-    setMsgs((p) => [...((data ?? []) as Msg[]).reverse(), ...p]); setOlder((data ?? []).length === PAGE);
+    if (!chatId || !msgs.length || olderBusy.current) return;
+    olderBusy.current = true; setOlderLoading(true);
+    const cid = chatId, firstId = msgs[0].id;
+    const { data, error } = await supabase.from("messages").select("*").eq("conversation_id", cid).lt("id", firstId).order("id", { ascending: false }).limit(PAGE);
+    olderBusy.current = false; setOlderLoading(false);
+    if (error || openRef.current !== cid) return;
+    const el = box.current;
+    if (el) prevS.current = { top: el.scrollTop, h: el.scrollHeight };
+    setMsgs((p) => mergeMsgs((data ?? []) as Msg[], p)); setOlder((data ?? []).length === PAGE);
   }
   async function send() {
     const body = draft.trim();
@@ -100,7 +107,7 @@ export default function Chats({ me, chatId, setChatId, nav }: { me: Profile; cha
     setSending(false);
     if (error || !data) return setSendErr("Не удалось отправить. Проверьте соединение и повторите.");
     atBottom.current = true;
-    setMsgs((p) => (p.some((x) => x.id === data.id) ? p : [...p, data as Msg])); setDraft(""); refreshSoon();
+    setMsgs((p) => mergeMsgs(p, [data as Msg])); setDraft(""); refreshSoon();
   }
 
   const row = rows.find((r) => r.conversation_id === chatId), peer = row ? peers[row.other_id] : undefined;
@@ -147,7 +154,7 @@ export default function Chats({ me, chatId, setChatId, nav }: { me: Profile; cha
               </button>
             </header>
             <div className="msgs" ref={box} onScroll={(e) => { const t = e.currentTarget; atBottom.current = t.scrollHeight - t.scrollTop - t.clientHeight < 80; }}>
-              {older && <button className="btn ghost older" onClick={loadOlder}>Показать ранее</button>}
+              {older && <button className="btn ghost older" onClick={loadOlder} disabled={olderLoading}>{olderLoading ? "Загрузка…" : "Показать ранее"}</button>}
               {msgState === "loading" && <p className="dim small center-t">Загрузка…</p>}
               {msgState === "error" && <div className="empty-in"><p className="err">Не удалось загрузить сообщения.</p></div>}
               {msgState === "ready" && !msgs.length && <p className="dim small center-t">Сообщений пока нет. Напишите первым.</p>}

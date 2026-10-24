@@ -25,7 +25,7 @@ function PostCard({ post, liked0, me, nav, onDelete, fresh }: { post: PostRow; l
     setCState("loading");
     const { data, error } = await supabase.from("comments").select("id,body,created_at,author_id").eq("post_id", post.id).order("created_at").limit(100);
     if (error) { console.error(error); return setCState("error"); }
-    setCms(await attachAuthors((data ?? []) as Omit<Cm, "author">[])); setCState("idle");
+    try { setCms(await attachAuthors((data ?? []) as Omit<Cm, "author">[])); setCState("idle"); } catch (e) { console.error(e); setCState("error"); }
   }
   const toggleCms = () => { if (!open) loadCms(); setOpen(!open); };
   async function addCm() {
@@ -79,16 +79,26 @@ export default function Feed({ me, nav }: { me: Profile; nav: Nav }) {
   const [posts, setPosts] = useState<PostRow[]>([]), [liked, setLiked] = useState<Set<string>>(new Set());
   const [state, setState] = useState<"loading" | "ready" | "error">("loading"), [more, setMore] = useState(false);
   const [draft, setDraft] = useState(""), [posting, setPosting] = useState(false), [err, setErr] = useState<string | null>(null);
-  const [fresh, setFresh] = useState<string | null>(null);
+  const [fresh, setFresh] = useState<string | null>(null), [moreErr, setMoreErr] = useState(false);
+  const busy = useRef(false);
   const load = useCallback(async (from: number) => {
-    const { data, error } = await supabase.from("posts").select("id,body,created_at,author_id,post_likes(count),comments(count)").order("created_at", { ascending: false }).range(from, from + PAGE - 1);
-    if (error) { console.error(error); return setState("error"); }
-    const list = await attachAuthors((data ?? []) as Omit<PostRow, "author">[]);
-    if (list.length) {
-      const { data: l } = await supabase.from("post_likes").select("post_id").eq("user_id", me.id).in("post_id", list.map((p) => p.id));
-      setLiked((s) => new Set([...s, ...(l ?? []).map((x) => x.post_id as string)]));
-    }
-    setPosts((p) => (from === 0 ? list : [...p, ...list])); setMore(list.length === PAGE); setState("ready");
+    if (busy.current) return; // защита от двойных запросов одной страницы
+    busy.current = true; setMoreErr(false);
+    try {
+      const { data, error } = await supabase.from("posts").select("id,body,created_at,author_id,post_likes(count),comments(count)").order("created_at", { ascending: false }).range(from, from + PAGE - 1);
+      if (error) throw error;
+      const raw = (data ?? []) as Omit<PostRow, "author">[];
+      const list = await attachAuthors(raw);
+      if (list.length) {
+        const { data: l } = await supabase.from("post_likes").select("post_id").eq("user_id", me.id).in("post_id", list.map((p) => p.id));
+        setLiked((s) => new Set([...s, ...(l ?? []).map((x) => x.post_id as string)]));
+      }
+      setPosts((p) => { if (from === 0) return list; const seen = new Set(p.map((x) => x.id)); return [...p, ...list.filter((x) => !seen.has(x.id))]; });
+      setMore(raw.length === PAGE); setState("ready");
+    } catch (e) {
+      console.error(e);
+      if (from === 0) setState("error"); else setMoreErr(true);
+    } finally { busy.current = false; }
   }, [me.id]);
   useEffect(() => { load(0); }, [load]);
 
@@ -119,6 +129,7 @@ export default function Feed({ me, nav }: { me: Profile; nav: Nav }) {
       {state === "error" && <div className="empty-in"><p className="err">Не удалось загрузить ленту.</p><button className="btn" onClick={() => { setState("loading"); load(0); }}>Повторить</button></div>}
       {state === "ready" && !posts.length && <div className="empty-in"><h2>Здесь пока тихо</h2><p className="muted">Опубликуйте первую запись.</p></div>}
       <ul className="posts">{posts.map((p) => <PostCard key={p.id} post={p} liked0={liked.has(p.id)} fresh={p.id === fresh} me={me} nav={nav} onDelete={(id) => setPosts((l) => l.filter((x) => x.id !== id))} />)}</ul>
+      {moreErr && <p className="err small center-t">Не удалось загрузить ещё. Попробуйте снова.</p>}
       {more && <button className="btn center" onClick={() => load(posts.length)}>Показать ещё</button>}
     </div>
   );

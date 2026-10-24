@@ -6,26 +6,30 @@ export const SIZES = { avatar: { w: 512, h: 512, maxMb: 5 }, cover: { w: 1600, h
 export type Kind = keyof typeof SIZES;
 const cache = new Map<string, { url: string; exp: number }>();
 
-export async function signedUrl(path: string) {
+async function sign(path: string): Promise<{ url: string | null; ok: boolean }> {
   const c = cache.get(path);
-  if (c && c.exp > Date.now() + 400_000) return c.url;
+  if (c && c.exp > Date.now() + 400_000) return { url: c.url, ok: true };
   const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(path, TTL);
-  if (error || !data) return c?.url ?? null;
+  if (error || !data) return { url: c && c.exp > Date.now() ? c.url : null, ok: false }; // просроченную ссылку не отдаём
   cache.set(path, { url: data.signedUrl, exp: Date.now() + TTL * 1000 });
-  return data.signedUrl;
+  return { url: data.signedUrl, ok: true };
 }
+export const signedUrl = async (path: string) => (await sign(path)).url;
+
+const RETRY = [2_000, 8_000, 30_000, 120_000]; // ограниченные повторы с нарастающей паузой
 
 // Подписанная ссылка обновляется заранее, пока открыта страница
 export function useSignedUrl(path?: string | null) {
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
     if (!path) { setUrl(null); return; }
-    let dead = false, t = 0;
+    let dead = false, t = 0, tries = 0;
     const run = async () => {
-      const u = await signedUrl(path);
+      const r = await sign(path);
       if (dead) return;
-      if (u) setUrl(u);
-      t = window.setTimeout(run, (TTL - 300) * 1000);
+      setUrl(r.url);
+      if (r.ok) { tries = 0; t = window.setTimeout(run, (TTL - 300) * 1000); }
+      else if (tries < RETRY.length) t = window.setTimeout(run, RETRY[tries++]);
     };
     run();
     return () => { dead = true; clearTimeout(t); };

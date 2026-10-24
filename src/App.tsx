@@ -1,5 +1,5 @@
-import { useCallback, useContext, useEffect, useMemo, useState, type FormEvent } from "react";
-import { MessageSquare, Rss, Search, User, LogOut, Pencil, Camera, Circle, Snowflake, Ghost, Info, Calendar, Palette, Lock, ArrowLeft, MessageCircle, ShieldCheck } from "lucide-react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { MessageSquare, Rss, Search, User, LogOut, Pencil, Camera, Circle, Snowflake, Ghost, Palette, Lock, ArrowLeft, MessageCircle, ShieldCheck } from "lucide-react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase, type Profile } from "./supabase";
 import Auth, { Wordmark } from "./Auth";
@@ -142,10 +142,17 @@ function ProfilePosts({ profile }: { profile: Profile }) {
   const [posts, setPosts] = useState<Post[]>([]);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [more, setMore] = useState(false);
+  const moreBusy = useRef(false), gen = useRef(0);
   const load = useCallback(async (from: number) => {
+    if (from > 0) { if (moreBusy.current) return; moreBusy.current = true; } // двойной клик по «Показать ещё»
+    const g = from === 0 ? ++gen.current : gen.current;
     const { data, error } = await supabase.from("posts").select("id, body, created_at").eq("author_id", profile.id).order("created_at", { ascending: false }).range(from, from + PAGE - 1);
-    if (error) return setState("error");
-    setPosts((p) => (from === 0 ? data : [...p, ...data]) as Post[]); setMore(data.length === PAGE); setState("ready");
+    if (from > 0) moreBusy.current = false;
+    if (g !== gen.current) return; // ответ для другого профиля
+    if (error) { console.error(error); return setState("error"); }
+    const list = (data ?? []) as Post[];
+    setPosts((p) => { if (from === 0) return list; const seen = new Set(p.map((x) => x.id)); return [...p, ...list.filter((x) => !seen.has(x.id))]; });
+    setMore(list.length === PAGE); setState("ready");
   }, [profile.id]);
   useEffect(() => { setState("loading"); setPosts([]); load(0); }, [load]);
   if (state === "loading") return <div className="skel" aria-label="Загрузка" />;
@@ -209,9 +216,15 @@ function ProfilePage({ profile, isOwn, nav, onSaved, onBack, bioMax = 200 }: { p
     <article className="profile">
       <Cover profile={profile} isOwn={isOwn} onEdit={() => setEditor("cover")} onBack={onBack} />
       <header className="p-head">
-        <div className="p-avatar">
-          {isOwn ? <button className="av-btn" onClick={() => setEditor("avatar")} aria-label="Изменить аватар"><Avatar name={profile.display_name} size={96} path={profile.avatar_path} /><span className="av-cam"><Camera size={20} strokeWidth={1.75} /></span></button>
-            : <Avatar name={profile.display_name} size={96} path={profile.avatar_path} uid={profile.id} />}
+        <div className="p-top">
+          <div className="p-avatar">
+            {isOwn ? <button className="av-btn" onClick={() => setEditor("avatar")} aria-label="Изменить аватар"><Avatar name={profile.display_name} size={96} path={profile.avatar_path} /><span className="av-cam"><Camera size={20} strokeWidth={1.75} /></span></button>
+              : <Avatar name={profile.display_name} size={96} path={profile.avatar_path} uid={profile.id} />}
+          </div>
+          {!editing && <div className="p-actions">
+            {isOwn ? <button className="btn" onClick={start}><Pencil size={15} strokeWidth={1.75} />Редактировать профиль</button>
+              : <button className="btn primary" onClick={write} disabled={opening}><MessageCircle size={15} strokeWidth={1.75} />{opening ? "Открываю…" : "Написать"}</button>}
+          </div>}
         </div>
         {editing ? (
           <form onSubmit={save} className="stack p-form">
@@ -227,19 +240,12 @@ function ProfilePage({ profile, isOwn, nav, onSaved, onBack, bioMax = 200 }: { p
         ) : (<>
           <div className="p-info">
             <h1>{profile.display_name}</h1>
-            <p className="p-user">@{profile.username}</p>
-            {!isOwn && <p className={"small " + (isOnline ? "on-txt" : "dim")}>{status}</p>}
+            <p className="p-user">@{profile.username}{!isOwn && <span className={isOnline ? "on-txt" : "dim"}> · {status}</span>}</p>
             <Badges list={badges} />
           </div>
-          {err && <p className="err center-t" role="alert">{err}</p>}
-          <div className="p-actions">
-            {isOwn ? <button className="btn" onClick={start}><Pencil size={15} strokeWidth={1.75} />Редактировать профиль</button>
-              : <button className="btn primary" onClick={write} disabled={opening}><MessageCircle size={15} strokeWidth={1.75} />{opening ? "Открываю…" : "Написать"}</button>}
-          </div>
-          <ul className="info">
-            {profile.bio && <li><Info size={20} strokeWidth={1.5} /><div><p className="p-bio">{profile.bio}</p><span>О себе</span></div></li>}
-            <li><Calendar size={20} strokeWidth={1.5} /><div><p>{new Date(profile.created_at).toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" })}</p><span>Аккаунт создан</span></div></li>
-          </ul>
+          {err && <p className="err" role="alert">{err}</p>}
+          {profile.bio && <p className="p-bio">{profile.bio}</p>}
+          <p className="p-since">На сайте с {new Date(profile.created_at).toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" }).replace(" г.", "")}</p>
         </>)}
       </header>
       <div className="tabs" role="tablist"><button role="tab" aria-selected className="tab on">Публикации</button></div>

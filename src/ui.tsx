@@ -21,9 +21,11 @@ export function Avatar({ name, size = 40, path, uid }: { name: string; size?: nu
 export async function attachAuthors<T extends { author_id: string }>(rows: T[]): Promise<(T & { author: Profile })[]> {
   const ids = [...new Set(rows.map((r) => r.author_id))];
   if (!ids.length) return [];
-  const { data } = await supabase.from("profiles").select("*").in("id", ids);
-  const m = new Map(((data ?? []) as Profile[]).map((p) => [p.id, p]));
-  return rows.filter((r) => m.has(r.author_id)).map((r) => ({ ...r, author: m.get(r.author_id)! }));
+  const { data, error } = await supabase.from("profiles").select("*").in("id", ids);
+  if (error) throw error; // ошибку показывает вызывающий компонент, посты молча не пропадают
+  const m = new Map(((data ?? []) as Profile[]).map((x) => [x.id, x]));
+  if (rows.some((r) => !m.has(r.author_id))) throw new Error("author_missing");
+  return rows.map((r) => ({ ...r, author: m.get(r.author_id)! }));
 }
 export const fmtClock = (iso: string) => new Date(iso).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
 export const fmtDateTime = (iso: string) => new Date(iso).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
