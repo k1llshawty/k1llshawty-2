@@ -47,24 +47,42 @@ export function renderBody(text: string): ReactNode[] {
 
 // ── Premium и эмодзи-статус (считаются на сервере: RPC user_flair) ──
 export type Flair = { premium: boolean; emoji: string | null; custom: string | null };
+type Row = { user_id: string; emoji: string | null; custom: string | null; premium_until: string | null; status_until: string | null };
 const NONE: Flair = { premium: false, emoji: null, custom: null };
-const fcache = new Map<string, { f: Flair; t: number }>(), fsubs = new Set<() => void>(), inflight = new Set<string>();
+const STALE = 120_000, MAX_WAIT = 6 * 3600_000, MIN_WAIT = 30_000;
+const fcache = new Map<string, { f: Flair; t: number }>(), fsubs = new Set<() => void>(), inflight = new Set<string>(), timers = new Map<string, number>();
 let pend = new Set<string>(), ft = 0;
+const notify = () => fsubs.forEach((f) => f());
 function requestFlair(id: string) { if (inflight.has(id)) return; inflight.add(id); pend.add(id); if (!ft) ft = window.setTimeout(flushFlair, 20); }
+// Один таймер на пользователя: ровно в момент окончания Premium или статуса запись перепроверяется (без постоянного опроса)
+function scheduleExpiry(id: string, row: Row | undefined) {
+  clearTimeout(timers.get(id)); timers.delete(id);
+  if (!row) return;
+  const ends = [row.premium_until, row.emoji || row.custom ? row.status_until : null].filter(Boolean).map((x) => new Date(x as string).getTime());
+  if (!ends.length) return;
+  const delay = Math.min(Math.max(Math.min(...ends) - Date.now() + 1000, MIN_WAIT), MAX_WAIT); // MIN_WAIT защищает от частых запросов при сдвиге часов
+  timers.set(id, window.setTimeout(() => invalidateFlair(id), delay));
+}
 async function flushFlair() {
   ft = 0; const ids = [...pend]; pend = new Set();
   const { data, error } = await supabase.rpc("user_flair", { p_ids: ids });
   if (error) console.error("user_flair:", error);
-  const m = new Map(((data ?? []) as { user_id: string; emoji: string | null; custom: string | null }[]).map((r) => [r.user_id, r]));
-  ids.forEach((id) => { inflight.delete(id); const r = m.get(id); fcache.set(id, { t: Date.now(), f: r ? { premium: true, emoji: r.emoji, custom: r.custom } : NONE }); });
-  fsubs.forEach((f) => f());
+  const m = new Map(((data ?? []) as Row[]).map((r) => [r.user_id, r]));
+  ids.forEach((id) => {
+    inflight.delete(id); const r = m.get(id);
+    fcache.set(id, { t: Date.now(), f: r ? { premium: true, emoji: r.emoji, custom: r.custom } : NONE });
+    scheduleExpiry(id, r);
+  });
+  notify();
 }
-export function invalidateFlair(id: string) { fcache.delete(id); fsubs.forEach((f) => f()); }
+export function invalidateFlair(id: string) { clearTimeout(timers.get(id)); timers.delete(id); fcache.delete(id); notify(); }
+// При возвращении на вкладку данные считаются устаревшими и обновляются одним пакетным запросом для видимых людей
+if (typeof document !== "undefined") document.addEventListener("visibilitychange", () => { if (!document.hidden) { fcache.forEach((v) => { v.t = 0; }); notify(); } });
 export function useFlair(uid?: string): Flair {
   const [, tick] = useReducer((x: number) => x + 1, 0);
   useEffect(() => { const f = () => tick(); fsubs.add(f); return () => { fsubs.delete(f); }; }, []);
   const c = uid ? fcache.get(uid) : undefined;
-  useEffect(() => { if (uid && (!c || Date.now() - c.t > 60_000)) requestFlair(uid); });
+  useEffect(() => { if (uid && (!c || Date.now() - c.t > STALE)) requestFlair(uid); });
   return c?.f ?? NONE;
 }
 export function FlairMarks({ uid, size = 16 }: { uid?: string; size?: number }) {

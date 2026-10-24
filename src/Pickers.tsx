@@ -45,7 +45,7 @@ export function StatusEditor({ uid, onClose }: { uid: string; onClose: () => voi
     setBusy(true); setErr(null);
     const { error } = await supabase.rpc("set_status", { p_emoji: clear ? null : sel?.emoji ?? null, p_custom: clear ? null : sel?.custom ?? null, p_hours: clear ? null : hours });
     setBusy(false);
-    if (error) { console.error(error); return setErr(error.message?.includes("premium_required") ? "Эмодзи-статус доступен только с активным Premium." : "Не удалось сохранить статус. Попробуйте ещё раз."); }
+    if (error) { console.error(error); return setErr(error.message?.includes("premium_required") ? "Эмодзи-статус доступен только с активным Premium." : error.message?.includes("bad_duration") ? "Недопустимый срок статуса." : "Не удалось сохранить статус. Попробуйте ещё раз."); }
     invalidateFlair(uid); onClose();
   }
   return (

@@ -104,16 +104,27 @@ type Staged = { blob: Blob; url: string; name: string };
 const KIND_LABELS: Record<string, string> = { status: "Эмодзи ника", message: "Эмодзи в сообщениях", sticker: "Стикеры" };
 const MAX_FILES = 60, MAX_SRC = 3 * 1024 * 1024;
 
+const LIMIT = 500 * 1024; // bucket принимает до 512 КБ; небольшой запас
 async function fit(file: File, maxSide: number): Promise<Blob> {
   const bmp = await createImageBitmap(file);
-  const s = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
-  const c = document.createElement("canvas"); c.width = Math.max(1, Math.round(bmp.width * s)); c.height = Math.max(1, Math.round(bmp.height * s));
-  c.getContext("2d")!.drawImage(bmp, 0, 0, c.width, c.height); bmp.close();
-  const to = (t: string) => new Promise<Blob | null>((r) => c.toBlob(r, t, 0.9));
-  let b = await to("image/webp");
-  if (!b || b.type !== "image/webp") b = await to("image/png");
-  if (!b) throw new Error("compress");
-  return b;
+  try {
+    let side = maxSide;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const k = Math.min(1, side / Math.max(bmp.width, bmp.height));
+      const c = document.createElement("canvas"); c.width = Math.max(1, Math.round(bmp.width * k)); c.height = Math.max(1, Math.round(bmp.height * k));
+      c.getContext("2d")!.drawImage(bmp, 0, 0, c.width, c.height);
+      const to = (t: string, q?: number) => new Promise<Blob | null>((res) => c.toBlob(res, t, q));
+      for (const q of [0.9, 0.75, 0.6, 0.45]) {
+        const b = await to("image/webp", q);
+        if (b && b.type === "image/webp" && b.size <= LIMIT) return b;
+        if (b && b.type !== "image/webp") break; // браузер не умеет WebP: качество не поможет, уменьшаем размер
+      }
+      const png = await to("image/png");
+      if (png && png.size <= LIMIT) return png;
+      side = Math.round(side * 0.8);
+    }
+  } finally { bmp.close(); }
+  throw new Error("too_big");
 }
 
 function PackManager() {
@@ -133,7 +144,10 @@ function PackManager() {
     setPacks((data ?? []) as unknown as PackRow[]); setState("ready");
   }, []);
   useEffect(() => { load(); }, [load]);
-  useEffect(() => () => staged.forEach((s) => URL.revokeObjectURL(s.url)), [staged]);
+  // Адреса превью освобождаются при удалении файла, после создания набора и при закрытии раздела (но не при каждом изменении списка)
+  const stagedRef = useRef<Staged[]>([]);
+  stagedRef.current = staged;
+  useEffect(() => () => stagedRef.current.forEach((x) => URL.revokeObjectURL(x.url)), []);
 
   const sel = Object.keys(kinds).filter((k) => kinds[k]);
   async function pick(files: FileList | null) {
@@ -141,10 +155,12 @@ function PackManager() {
     const list = [...files];
     if (staged.length + list.length > MAX_FILES) return setErr(`За раз можно добавить не больше ${MAX_FILES} изображений.`);
     const side = kinds.sticker ? 512 : 128, add: Staged[] = [];
+    const fail = (m: string) => { add.forEach((x) => URL.revokeObjectURL(x.url)); setErr(m); };
     for (const f of list) {
-      if (!["image/png", "image/webp"].includes(f.type)) return setErr("Подходят только PNG и WebP с прозрачным фоном.");
-      if (f.size > MAX_SRC) return setErr(`Файл «${f.name}» больше 3 МБ.`);
-      try { const b = await fit(f, side); add.push({ blob: b, url: URL.createObjectURL(b), name: f.name }); } catch { return setErr(`Не удалось прочитать «${f.name}».`); }
+      if (!["image/png", "image/webp"].includes(f.type)) return fail("Подходят только PNG и WebP с прозрачным фоном.");
+      if (f.size > MAX_SRC) return fail(`Файл «${f.name}» больше 3 МБ.`);
+      try { const b = await fit(f, side); add.push({ blob: b, url: URL.createObjectURL(b), name: f.name }); }
+      catch (e) { return fail(e instanceof Error && e.message === "too_big" ? `Файл «${f.name}» не удаётся уместить в 512 КБ даже после сжатия. Возьмите более простое или маленькое изображение.` : `Не удалось прочитать «${f.name}».`); }
     }
     setStaged((p) => [...p, ...add]);
   }
@@ -164,11 +180,11 @@ function PackManager() {
       }
       const { error: e2 } = await supabase.from("emoji_items").insert(rows); if (e2) throw e2;
       if (publish) { const { error: e3 } = await supabase.from("emoji_packs").update({ published: true }).eq("id", packId); if (e3) throw e3; }
-      invalidateCatalog(); setTitle(""); setStaged([]); await load();
+      invalidateCatalog(); setTitle(""); staged.forEach((x) => URL.revokeObjectURL(x.url)); setStaged([]); await load();
     } catch (e) {
       console.error(e);
-      if (up.length) await supabase.storage.from("emoji-packs").remove(up);
-      if (packId) await supabase.from("emoji_packs").delete().eq("id", packId);
+      if (up.length) { const { error: ce } = await supabase.storage.from("emoji-packs").remove(up); if (ce) console.error("cleanup storage:", ce); }
+      if (packId) { const { error: de } = await supabase.from("emoji_packs").delete().eq("id", packId); if (de) console.error("cleanup pack:", de); }
       setErr("Не удалось сохранить набор. Ничего не добавлено, попробуйте ещё раз.");
     }
     setBusy(false);
@@ -179,10 +195,23 @@ function PackManager() {
   }
   async function remove(p: PackRow) {
     if (!window.confirm(`Удалить набор «${p.title}» со всеми изображениями?`)) return;
-    const { data } = await supabase.from("emoji_items").select("path").eq("pack_id", p.id);
-    if (data?.length) await supabase.storage.from("emoji-packs").remove(data.map((r) => r.path as string));
+    setErr(null);
+    const { data: items, error: e0 } = await supabase.from("emoji_items").select("path").eq("pack_id", p.id);
+    if (e0) { console.error(e0); return setErr("Не удалось получить список файлов набора."); }
+    // Сначала строки в базе: если изображения уже используются, база откажет, и файлы останутся нетронутыми
     const { error } = await supabase.from("emoji_packs").delete().eq("id", p.id);
-    if (error) { console.error(error); setErr("Не удалось удалить набор."); } else { invalidateCatalog(); await load(); }
+    if (error) {
+      console.error(error);
+      return setErr(error.message?.includes("item_in_use")
+        ? "Набор нельзя удалить: его изображения уже есть в сообщениях, стикерах или эмодзи-статусах. Скройте набор: он пропадёт из выбора, а старые сообщения продолжат отображаться."
+        : "Не удалось удалить набор.");
+    }
+    const paths = (items ?? []).map((x) => x.path as string);
+    if (paths.length) {
+      const { error: se } = await supabase.storage.from("emoji-packs").remove(paths);
+      if (se) { console.error(se); setErr("Набор удалён, но файлы в хранилище очистить не удалось. Удалите их вручную: Supabase → Storage → emoji-packs."); }
+    }
+    invalidateCatalog(); await load();
   }
 
   return (
@@ -204,6 +233,7 @@ function PackManager() {
         {state === "loading" && <div className="skel" />}
         {state === "error" && <p className="err small">Не удалось загрузить наборы. Проверьте, что выполнена миграция 0008.</p>}
         {state === "ready" && !packs.length && <p className="dim small">Наборов пока нет.</p>}
+        {state === "ready" && !!packs.length && <p className="dim small">Скрытый набор нельзя выбрать для новых сообщений и статусов, но уже отправленные стикеры, эмодзи и статусы продолжают показываться. Использованный набор удалить нельзя — только скрыть.</p>}
         <ul className="adm-list">{packs.map((p) => (
           <li key={p.id} className="pack-row"><div className="cr-main"><strong>{p.title}</strong>
             <span className="dim small">{p.kinds.map((k) => KIND_LABELS[k]).join(", ")} · {p.emoji_items[0]?.count ?? 0} шт. · {p.published ? "опубликован" : "скрыт"}{p.premium_only ? " · Premium" : ""}</span></div>
