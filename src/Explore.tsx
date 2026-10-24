@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Search } from "lucide-react";
 import { supabase, type Profile } from "./supabase";
 import { Avatar, type Nav } from "./ui";
+import { FlairMarks } from "./emoji";
 
 export default function Explore({ me, nav }: { me: Profile; nav: Nav }) {
   const [q, setQ] = useState("");
@@ -32,7 +33,7 @@ export default function Explore({ me, nav }: { me: Profile; nav: Nav }) {
       {state === "ready" && <ul className="chat-list">{res.map((p) => (
         <li key={p.id}><button className="chat-row" onClick={() => nav.goProfile(p)}>
           <Avatar name={p.display_name} size={46} path={p.avatar_path} uid={p.id} />
-          <span className="cr-main"><strong>{p.display_name}</strong><span className="muted small">@{p.username}</span></span>
+          <span className="cr-main"><span className="ch-name"><strong>{p.display_name}</strong><FlairMarks uid={p.id} /></span><span className="muted small">@{p.username}</span></span>
         </button></li>))}</ul>}
     </div>
   );

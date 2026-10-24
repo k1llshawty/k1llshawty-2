@@ -1,5 +1,4 @@
-import { createContext, useContext, useEffect, useState } from "react";
-import { Heart, Shield, ShieldCheck, Sparkles, Star, Tag } from "lucide-react";
+import { createContext, useContext } from "react";
 import { useSignedUrl } from "./media";
 import { supabase, type Profile } from "./supabase";
 
@@ -45,38 +44,3 @@ export function lastSeenText(iso: string) {
 }
 // Перед выходом сохраняем время последнего визита (пока сессия ещё действует)
 export async function signOutClean() { try { await supabase.rpc("touch_last_seen"); } catch { /* не мешаем выходу */ } await supabase.auth.signOut(); }
-
-export type BadgeKind = "admin" | "moderator" | "favorite" | "early" | "premium" | "custom";
-export type BadgeRow = { id: string; kind: BadgeKind; label: string };
-export const KINDS: Record<BadgeKind, { text: string; Icon: typeof Star }> = {
-  admin: { text: "Администратор", Icon: ShieldCheck }, moderator: { text: "Модератор", Icon: Shield }, favorite: { text: "Любимка", Icon: Heart },
-  early: { text: "Ранний пользователь", Icon: Sparkles }, premium: { text: "Premium", Icon: Star }, custom: { text: "", Icon: Tag },
-};
-const ORDER: BadgeKind[] = ["admin", "moderator", "premium", "favorite", "early", "custom"];
-const bcache = new Map<string, BadgeRow[]>();
-export const dropBadges = (uid: string) => { bcache.delete(uid); };
-export function useBadges(uid?: string) {
-  const [b, setB] = useState<BadgeRow[]>((uid && bcache.get(uid)) || []);
-  useEffect(() => {
-    if (!uid) { setB([]); return; }
-    const c = bcache.get(uid);
-    if (c) { setB(c); return; }
-    let dead = false;
-    supabase.from("user_badges").select("id,kind,label").eq("user_id", uid).then(({ data }) => {
-      if (dead || !data) return;
-      const list = (data as BadgeRow[]).sort((x, y) => ORDER.indexOf(x.kind) - ORDER.indexOf(y.kind));
-      bcache.set(uid, list); setB(list);
-    });
-    return () => { dead = true; };
-  }, [uid]);
-  return b;
-}
-/** Текст плашек выводится как обычный текст React: HTML не исполняется */
-export function Badges({ list, max, compact }: { list: BadgeRow[]; max?: number; compact?: boolean }) {
-  if (!list.length) return null;
-  const shown = max ? list.slice(0, max) : list;
-  return (
-    <span className={"badges" + (compact ? " compact" : "")}>
-      {shown.map((b) => { const { Icon, text } = KINDS[b.kind]; return <span key={b.id} className="bdg" data-kind={b.kind}><Icon size={12} strokeWidth={1.75} />{b.kind === "custom" ? b.label : text}</span>; })}
-    </span>);
-}

@@ -1,15 +1,17 @@
 import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ArrowLeft, MessageSquare, Search, SendHorizontal } from "lucide-react";
+import { ArrowLeft, MessageSquare, Search, SendHorizontal, Smile, Sticker } from "lucide-react";
 import { supabase, type Profile } from "./supabase";
-import { Avatar, Badges, OnlineContext, fmtChatTime, fmtClock, lastSeenText, useBadges, type Nav } from "./ui";
+import { Avatar, OnlineContext, fmtChatTime, fmtClock, lastSeenText, type Nav } from "./ui";
+import { CustomEmoji, FlairMarks, renderBody, stripTokens, tokenOf } from "./emoji";
+import { EmojiPicker, StickerPicker } from "./Pickers";
 
-type Row = { conversation_id: string; other_id: string; last_body: string | null; last_at: string | null; last_sender: string | null; unread: number };
-type Msg = { id: number; conversation_id: string; sender_id: string; body: string; created_at: string };
+type Row = { conversation_id: string; other_id: string; last_body: string | null; last_type: string | null; last_at: string | null; last_sender: string | null; unread: number };
+type Msg = { id: number; conversation_id: string; sender_id: string; body: string; created_at: string; message_type: string; sticker_id: string | null };
 const PAGE = 40;
 // Слияние по id: без дублей и в стабильном порядке (id растёт вместе с вставкой)
 const mergeMsgs = (a: Msg[], b: Msg[]) => { const m = new Map<number, Msg>(); [...a, ...b].forEach((x) => m.set(x.id, x)); return [...m.values()].sort((x, y) => x.id - y.id); };
 
-export default function Chats({ me, chatId, setChatId, nav }: { me: Profile; chatId: string | null; setChatId: (id: string | null) => void; nav: Nav }) {
+export default function Chats({ me, chatId, setChatId, nav, premium }: { premium: boolean; me: Profile; chatId: string | null; setChatId: (id: string | null) => void; nav: Nav }) {
   const [rows, setRows] = useState<Row[]>([]);
   const [peers, setPeers] = useState<Record<string, Profile>>({});
   const [listState, setListState] = useState<"loading" | "ready" | "error">("loading");
@@ -99,19 +101,40 @@ export default function Chats({ me, chatId, setChatId, nav }: { me: Profile; cha
     if (el) prevS.current = { top: el.scrollTop, h: el.scrollHeight };
     setMsgs((p) => mergeMsgs((data ?? []) as Msg[], p)); setOlder((data ?? []).length === PAGE);
   }
+  const [pop, setPop] = useState<null | "emoji" | "sticker">(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!pop) return;
+    const d = (e: MouseEvent) => { if (!popRef.current?.contains(e.target as Node)) setPop(null); };
+    document.addEventListener("mousedown", d); return () => document.removeEventListener("mousedown", d);
+  }, [pop]);
+  function insert(t: string) {
+    const el = ta.current;
+    if (!el) { setDraft((d) => d + t); return; }
+    const a = el.selectionStart ?? draft.length, b = el.selectionEnd ?? a, next = draft.slice(0, a) + t + draft.slice(b);
+    if (next.length > 4000) return;
+    setDraft(next); requestAnimationFrame(() => { el.focus(); el.setSelectionRange(a + t.length, a + t.length); });
+  }
+  async function sendSticker(id: string) {
+    if (!chatId || sending) return;
+    setSending(true); setSendErr(null); setPop(null);
+    const { data, error } = await supabase.from("messages").insert({ conversation_id: chatId, body: "", message_type: "sticker", sticker_id: id }).select().single();
+    setSending(false);
+    if (error || !data) { console.error(error); return setSendErr(error?.code === "42501" ? "Этот набор стикеров доступен только с Premium." : "Не удалось отправить стикер."); }
+    atBottom.current = true; setMsgs((p) => mergeMsgs(p, [data as Msg])); refreshSoon();
+  }
   async function send() {
     const body = draft.trim();
     if (!body || sending || !chatId) return;
     setSending(true); setSendErr(null);
     const { data, error } = await supabase.from("messages").insert({ conversation_id: chatId, body }).select().single();
     setSending(false);
-    if (error || !data) return setSendErr("Не удалось отправить. Проверьте соединение и повторите.");
+    if (error || !data) { console.error(error); return setSendErr(error?.code === "42501" ? "Этот набор эмодзи доступен только с Premium." : "Не удалось отправить. Проверьте соединение и повторите."); }
     atBottom.current = true;
     setMsgs((p) => mergeMsgs(p, [data as Msg])); setDraft(""); refreshSoon();
   }
 
   const row = rows.find((r) => r.conversation_id === chatId), peer = row ? peers[row.other_id] : undefined;
-  const peerBadges = useBadges(peer?.id);
   const peerId = row?.other_id, peerOn = peerId ? online.has(peerId) : false;
   // Свежее время последнего визита подтягиваем при открытии чата и когда собеседник выходит из сети
   useEffect(() => {
@@ -136,8 +159,8 @@ export default function Chats({ me, chatId, setChatId, nav }: { me: Profile; cha
               <button className={"chat-row" + (r.conversation_id === chatId ? " on" : "")} onClick={() => setChatId(r.conversation_id)}>
                 <Avatar name={p?.display_name ?? "?"} size={48} path={p?.avatar_path} uid={p?.id} />
                 <span className="cr-main">
-                  <span className="cr-top"><strong>{p?.display_name ?? "…"}</strong>{r.last_at && <time className="dim">{fmtChatTime(r.last_at)}</time>}</span>
-                  <span className="cr-bot"><span className="cr-prev muted">{r.last_body ? (r.last_sender === me.id ? "Вы: " : "") + r.last_body : "Нет сообщений"}</span>{r.unread > 0 && <b className="badge">{r.unread > 99 ? "99+" : r.unread}</b>}</span>
+                  <span className="cr-top"><span className="ch-name"><strong>{p?.display_name ?? "…"}</strong><FlairMarks uid={p?.id} /></span>{r.last_at && <time className="dim">{fmtChatTime(r.last_at)}</time>}</span>
+                  <span className="cr-bot"><span className="cr-prev muted">{r.last_type === "sticker" ? (r.last_sender === me.id ? "Вы: " : "") + "Стикер" : r.last_body ? (r.last_sender === me.id ? "Вы: " : "") + stripTokens(r.last_body) : "Нет сообщений"}</span>{r.unread > 0 && <b className="badge">{r.unread > 99 ? "99+" : r.unread}</b>}</span>
                 </span>
               </button>
             </li>); })}
@@ -150,7 +173,7 @@ export default function Chats({ me, chatId, setChatId, nav }: { me: Profile; cha
               <button className="icon-btn back" onClick={() => setChatId(null)} aria-label="К списку чатов"><ArrowLeft size={20} strokeWidth={1.75} /></button>
               <button className="ch-who" onClick={() => peer && nav.goProfile(peer)} disabled={!peer}>
                 <Avatar name={peer?.display_name ?? "?"} size={40} path={peer?.avatar_path} uid={peer?.id} />
-                <span className="cr-main"><span className="ch-name"><strong>{peer?.display_name ?? "…"}</strong><Badges list={peerBadges} max={2} compact /></span><span className={"small " + (peerOn ? "on-txt" : "dim")}>{peer ? (peerOn ? "В сети" : peer.last_seen_at ? lastSeenText(peer.last_seen_at) : "Не в сети") : ""}</span></span>
+                <span className="cr-main"><span className="ch-name"><strong>{peer?.display_name ?? "…"}</strong><FlairMarks uid={peer?.id} /></span><span className={"small " + (peerOn ? "on-txt" : "dim")}>{peer ? (peerOn ? "В сети" : peer.last_seen_at ? lastSeenText(peer.last_seen_at) : "Не в сети") : ""}</span></span>
               </button>
             </header>
             <div className="msgs" ref={box} onScroll={(e) => { const t = e.currentTarget; atBottom.current = t.scrollHeight - t.scrollTop - t.clientHeight < 80; }}>
@@ -158,13 +181,21 @@ export default function Chats({ me, chatId, setChatId, nav }: { me: Profile; cha
               {msgState === "loading" && <p className="dim small center-t">Загрузка…</p>}
               {msgState === "error" && <div className="empty-in"><p className="err">Не удалось загрузить сообщения.</p></div>}
               {msgState === "ready" && !msgs.length && <p className="dim small center-t">Сообщений пока нет. Напишите первым.</p>}
-              {msgs.map((m) => (
-                <div key={m.id} className={"bubble " + (m.sender_id === me.id ? "out" : "in") + (m.id > baseId.current ? " fresh" : "")}><span>{m.body}</span><time>{fmtClock(m.created_at)}</time></div>
-              ))}
+              {msgs.map((m) => {
+                const dir = m.sender_id === me.id ? "out" : "in", fresh = m.id > baseId.current ? " fresh" : "";
+                return m.message_type === "sticker"
+                  ? <div key={m.id} className={"sticker-msg " + dir + fresh}>{m.sticker_id ? <CustomEmoji id={m.sticker_id} size={150} className="stk" /> : <span className="dim small">Стикер удалён</span>}<time>{fmtClock(m.created_at)}</time></div>
+                  : <div key={m.id} className={"bubble " + dir + fresh}><span>{renderBody(m.body)}</span><time>{fmtClock(m.created_at)}</time></div>;
+              })}
             </div>
-            <div className="composer-wrap">
+            <div className="composer-wrap" ref={popRef}>
+              {pop && <div className="pop">{pop === "emoji"
+                ? <EmojiPicker kind="message" premium={premium} onUnicode={insert} onCustom={(id) => insert(tokenOf(id))} />
+                : <StickerPicker premium={premium} onPick={sendSticker} />}</div>}
               {sendErr && <p className="err small" role="alert">{sendErr}</p>}
               <div className="composer">
+                <button className="icon-btn" onClick={() => setPop(pop === "emoji" ? null : "emoji")} aria-label="Эмодзи" aria-expanded={pop === "emoji"}><Smile size={20} strokeWidth={1.75} /></button>
+                <button className="icon-btn" onClick={() => setPop(pop === "sticker" ? null : "sticker")} aria-label="Стикеры" aria-expanded={pop === "sticker"}><Sticker size={20} strokeWidth={1.75} /></button>
                 <textarea ref={ta} rows={1} value={draft} maxLength={4000} placeholder="Сообщение" aria-label="Сообщение" onChange={(e) => setDraft(e.target.value)}
                   onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); } }} />
                 <button className="send" onClick={send} disabled={!draft.trim() || sending} aria-label="Отправить"><SendHorizontal size={20} strokeWidth={1.75} /></button>

@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { MessageSquare, Rss, Search, User, LogOut, Pencil, Camera, Circle, Snowflake, Ghost, Palette, Lock, ArrowLeft, MessageCircle, ShieldCheck } from "lucide-react";
+import { MessageSquare, Rss, Search, User, LogOut, Pencil, Camera, Circle, Snowflake, Ghost, Palette, Lock, X, MessageCircle, ShieldCheck } from "lucide-react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase, type Profile } from "./supabase";
 import Auth, { Wordmark } from "./Auth";
@@ -10,11 +10,13 @@ import Chats from "./Chats";
 import Explore from "./Explore";
 import Feed from "./Feed";
 import Admin from "./Admin";
-import { Avatar, Badges, OnlineContext, fmtDateTime, lastSeenText, signOutClean, useBadges, type Nav, type Tab } from "./ui";
+import { Avatar, OnlineContext, fmtDateTime, lastSeenText, signOutClean, type Nav, type Tab } from "./ui";
+import { FlairMarks, useFlair } from "./emoji";
+import { StatusEditor } from "./Pickers";
 
 const TABS: { id: Tab; label: string; Icon: typeof User }[] = [
   { id: "chats", label: "Чаты", Icon: MessageSquare }, { id: "feed", label: "Лента", Icon: Rss },
-  { id: "explore", label: "Поиск", Icon: Search }, { id: "profile", label: "Профиль", Icon: User },
+  { id: "explore", label: "Поиск", Icon: Search },
 ];
 
 export default function App() {
@@ -61,11 +63,11 @@ function Shell({ session }: { session: Session }) {
   const [chatId, setChatId] = useState<string | null>(null);
   const [loadErr, setLoadErr] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
-  const [longBio, setLongBio] = useState(false);
+  const myFlair = useFlair(session.user.id);
+  const [panelEditing, setPanelEditing] = useState(false);
   useEffect(() => {
     // Роль берётся из базы (RLS отдаёт строку только самому администратору); интерфейс лишь отражает её
     supabase.from("admins").select("user_id").eq("user_id", session.user.id).maybeSingle().then(({ data }) => setIsAdmin(!!data));
-    supabase.from("user_perks").select("long_bio").eq("user_id", session.user.id).maybeSingle().then(({ data }) => setLongBio(!!data?.long_bio));
   }, [session.user.id]);
   useEffect(() => {
     supabase.from("profiles").select("*").eq("id", session.user.id).single()
@@ -96,6 +98,12 @@ function Shell({ session }: { session: Session }) {
     return () => { clearInterval(iv); document.removeEventListener("visibilitychange", vis); window.removeEventListener("pagehide", hide); setOnline(new Set()); supabase.removeChannel(ch); };
   }, [session.user.id]);
 
+  useEffect(() => {
+    if (!viewing) return;
+    const k = (e: KeyboardEvent) => { if (e.key === "Escape" && !panelEditing && !document.querySelector(".modal-back")) setViewing(null); };
+    window.addEventListener("keydown", k); return () => window.removeEventListener("keydown", k);
+  }, [viewing, panelEditing]);
+
   const startChat = useCallback(async (userId: string) => {
     const { data, error } = await supabase.rpc("start_direct_chat", { other: userId });
     if (error || !data) return false;
@@ -110,11 +118,10 @@ function Shell({ session }: { session: Session }) {
   if (!me) return <div className="boot"><Wordmark big /></div>;
 
   const tabs = isAdmin ? [...TABS, ADMIN_TAB] : TABS;
-  const chatOpen = tab === "chats" && !!chatId && !viewing;
+  const chatOpen = tab === "chats" && !!chatId;
+  const shown = viewing ? (viewing.id === me.id ? me : viewing) : null;
   let main;
-  if (viewing && viewing.id !== me.id) main = <ProfilePage key={viewing.id} profile={viewing} isOwn={false} nav={nav} onBack={() => setViewing(null)} />;
-  else if (viewing || tab === "profile") main = <ProfilePage profile={me} isOwn nav={nav} onSaved={setMe} bioMax={longBio ? 1000 : 200} onBack={viewing ? () => setViewing(null) : undefined} />;
-  else if (tab === "chats") main = <Chats me={me} chatId={chatId} setChatId={setChatId} nav={nav} />;
+  if (tab === "chats") main = <Chats me={me} chatId={chatId} setChatId={setChatId} nav={nav} premium={myFlair.premium} />;
   else if (tab === "admin" && isAdmin) main = <Admin />;
   else if (tab === "feed") main = <Feed me={me} nav={nav} />;
   else main = <Explore me={me} nav={nav} />;
@@ -123,14 +130,27 @@ function Shell({ session }: { session: Session }) {
     <OnlineContext.Provider value={online}>
     <div className={"shell" + (chatOpen ? " chat-open" : "")}>
       <nav className="rail" aria-label="Разделы">
-        <div className="rail-brand" title="k1llshawty.exe">k1</div>
+        <div className="rail-brand" title="k1llshawty.exe"><span className="full">k1llshawty<i>.exe</i></span><span className="short">k1</span></div>
         {tabs.map(({ id, label, Icon }) => (
-          <button key={id} title={id === "admin" ? "Администрирование" : undefined} aria-label={id === "admin" ? "Администрирование" : undefined} className={"rail-item" + (tab === id && !viewing ? " on" : "")} onClick={() => nav.goTab(id)} aria-current={tab === id && !viewing ? "page" : undefined}>
-            {id === "profile" ? <Avatar name={me.display_name} size={26} path={me.avatar_path} /> : <Icon size={22} strokeWidth={1.75} />}<span>{label}</span>
+          <button key={id} title={id === "admin" ? "Администрирование" : label} className={"rail-item" + (tab === id ? " on" : "")} onClick={() => nav.goTab(id)} aria-current={tab === id ? "page" : undefined}>
+            <Icon size={22} strokeWidth={1.75} />{id === "admin" ? <><span className="full-l">Администрирование</span><span className="short-l">Админ</span></> : <span>{label}</span>}
           </button>))}
-        <div className="rail-foot only-wide"><ThemeSwitch compact /></div>
+        <button className={"rail-item" + (shown && shown.id === me.id ? " on" : "")} title="Профиль" onClick={() => setViewing(me)}>
+          <Avatar name={me.display_name} size={24} path={me.avatar_path} /><span>Профиль</span>
+        </button>
+        <div className="rail-foot">
+          <button className="acct" onClick={() => setViewing(me)} aria-label="Мой профиль"><Avatar name={me.display_name} size={36} path={me.avatar_path} />
+            <span className="cr-main"><span className="ch-name"><strong>{me.display_name}</strong><FlairMarks uid={me.id} /></span><span className="dim small">@{me.username}</span></span></button>
+          <ThemeSwitch compact />
+        </div>
       </nav>
-      <main className={"view" + (tab === "chats" && !viewing ? " flush" : "")}>{main}</main>
+      <main className={"view" + (tab === "chats" ? " flush" : "")}>{main}</main>
+      {shown && (
+        <div className="drawer-back" onMouseDown={(e) => { if (e.target === e.currentTarget && !panelEditing) setViewing(null); }}>
+          <aside className="drawer" role="dialog" aria-label="Профиль">
+            <ProfilePage key={shown.id} profile={shown} isOwn={shown.id === me.id} nav={nav} onSaved={setMe} onBack={() => setViewing(null)} onEditing={setPanelEditing} premium={myFlair.premium} />
+          </aside>
+        </div>)}
     </div>
     </OnlineContext.Provider>
   );
@@ -172,12 +192,13 @@ function Cover({ profile, isOwn, onEdit, onBack }: { profile: Profile; isOwn: bo
   return (
     <div className="cover">
       {url && <img className="cover-img" src={url} alt="" />}
-      {onBack && <button className="icon-btn cover-btn left" onClick={onBack} aria-label="Назад"><ArrowLeft size={18} strokeWidth={1.75} /></button>}
+      {onBack && <button className="icon-btn cover-btn left" onClick={onBack} aria-label="Закрыть"><X size={18} strokeWidth={1.75} /></button>}
       {isOwn && <button className="icon-btn cover-btn" onClick={onEdit} title={l} aria-label={l}><Camera size={18} strokeWidth={1.75} /></button>}
     </div>);
 }
 
-function ProfilePage({ profile, isOwn, nav, onSaved, onBack, bioMax = 200 }: { profile: Profile; isOwn: boolean; nav: Nav; onSaved?: (p: Profile) => void; onBack?: () => void; bioMax?: number }) {
+function ProfilePage({ profile, isOwn, nav, onSaved, onBack, onEditing, premium }: { profile: Profile; isOwn: boolean; nav: Nav; onSaved?: (p: Profile) => void; onBack?: () => void; onEditing?: (v: boolean) => void; premium: boolean }) {
+  const bioMax = premium ? 1000 : 200;
   const [editing, setEditing] = useState(false);
   const [f, setF] = useState({ display_name: profile.display_name, username: profile.username, bio: profile.bio });
   const [busy, setBusy] = useState(false);
@@ -186,7 +207,8 @@ function ProfilePage({ profile, isOwn, nav, onSaved, onBack, bioMax = 200 }: { p
   const [opening, setOpening] = useState(false);
   const isOnline = useContext(OnlineContext).has(profile.id);
   const [seen, setSeen] = useState(profile.last_seen_at);
-  const badges = useBadges(profile.id);
+  const [statusEd, setStatusEd] = useState(false);
+  useEffect(() => { onEditing?.(editing); return () => onEditing?.(false); }, [editing, onEditing]);
   useEffect(() => {
     setSeen(profile.last_seen_at);
     if (isOwn || isOnline) return;
@@ -239,13 +261,17 @@ function ProfilePage({ profile, isOwn, nav, onSaved, onBack, bioMax = 200 }: { p
           </form>
         ) : (<>
           <div className="p-info">
-            <h1>{profile.display_name}</h1>
+            <h1 className="p-h1"><span>{profile.display_name}</span><FlairMarks uid={profile.id} size={20} /></h1>
             <p className="p-user">@{profile.username}{!isOwn && <span className={isOnline ? "on-txt" : "dim"}> · {status}</span>}</p>
-            <Badges list={badges} />
           </div>
           {err && <p className="err" role="alert">{err}</p>}
           {profile.bio && <p className="p-bio">{profile.bio}</p>}
           <p className="p-since">На сайте с {new Date(profile.created_at).toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" }).replace(" г.", "")}</p>
+          {isOwn && (
+            <div className="p-status">
+              {premium ? (<><div><strong>Эмодзи-статус</strong><p className="dim small">Показывается рядом с именем в чатах и профиле</p></div><button className="btn" onClick={() => setStatusEd(true)}>Изменить</button></>)
+                : <p className="dim small">k1llshawty Premium выдаёт владелец проекта. Он даёт эмодзи-статус, кастомные эмодзи, стикеры из Premium-наборов и описание до 1000 символов.</p>}
+            </div>)}
         </>)}
       </header>
       <div className="tabs" role="tablist"><button role="tab" aria-selected className="tab on">Публикации</button></div>
@@ -255,6 +281,7 @@ function ProfilePage({ profile, isOwn, nav, onSaved, onBack, bioMax = 200 }: { p
           <div className="not-wide"><ThemeSwitch /></div>
           <button className="btn" onClick={() => signOutClean()}><LogOut size={15} strokeWidth={1.75} />Выйти</button>
         </footer>)}
+      {statusEd && <StatusEditor uid={profile.id} onClose={() => setStatusEd(false)} />}
       {editor && <ImageEditor kind={editor} profile={profile} onClose={() => setEditor(null)} onSaved={(p) => onSaved?.(p)} />}
     </article>
   );

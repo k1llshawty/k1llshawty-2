@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Heart, MessageCircle, Trash2 } from "lucide-react";
 import { supabase, type Profile } from "./supabase";
 import { Avatar, attachAuthors, fmtDateTime, type Nav } from "./ui";
+import { FlairMarks } from "./emoji";
 
 type PostRow = { id: string; body: string; created_at: string; author_id: string; author: Profile; post_likes: { count: number }[]; comments: { count: number }[] };
 type Cm = { id: string; body: string; created_at: string; author_id: string; author: Profile };
@@ -50,7 +51,7 @@ function PostCard({ post, liked0, me, nav, onDelete, fresh }: { post: PostRow; l
     <li className={"pcard" + (fresh ? " fresh" : "")}>
       <button className="pc-av" onClick={() => nav.goProfile(a)} aria-label={a.display_name}><Avatar name={a.display_name} size={42} path={a.avatar_path} uid={a.id} /></button>
       <div className="pc-main">
-        <p className="post-meta"><button className="pc-name" onClick={() => nav.goProfile(a)}>{a.display_name}</button><span className="muted">@{a.username}</span><time className="dim">{fmtDateTime(post.created_at)}</time></p>
+        <p className="post-meta"><button className="pc-name" onClick={() => nav.goProfile(a)}>{a.display_name}</button><FlairMarks uid={a.id} /><span className="muted">@{a.username}</span><time className="dim">{fmtDateTime(post.created_at)}</time></p>
         <p className="post-body">{post.body}</p>
         <div className="pc-actions">
           <button className={"act" + (liked ? " on" : "")} onClick={toggle} aria-pressed={liked} aria-label="Лайк"><Heart size={17} strokeWidth={1.75} fill={liked ? "currentColor" : "none"} />{likes}</button>

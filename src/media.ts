@@ -6,12 +6,13 @@ export const SIZES = { avatar: { w: 512, h: 512, maxMb: 5 }, cover: { w: 1600, h
 export type Kind = keyof typeof SIZES;
 const cache = new Map<string, { url: string; exp: number }>();
 
-async function sign(path: string): Promise<{ url: string | null; ok: boolean }> {
-  const c = cache.get(path);
+async function sign(path: string, bucket = BUCKET): Promise<{ url: string | null; ok: boolean }> {
+  const key = bucket + "/" + path;
+  const c = cache.get(key);
   if (c && c.exp > Date.now() + 400_000) return { url: c.url, ok: true };
-  const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(path, TTL);
+  const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, TTL);
   if (error || !data) return { url: c && c.exp > Date.now() ? c.url : null, ok: false }; // просроченную ссылку не отдаём
-  cache.set(path, { url: data.signedUrl, exp: Date.now() + TTL * 1000 });
+  cache.set(key, { url: data.signedUrl, exp: Date.now() + TTL * 1000 });
   return { url: data.signedUrl, ok: true };
 }
 export const signedUrl = async (path: string) => (await sign(path)).url;
@@ -19,13 +20,13 @@ export const signedUrl = async (path: string) => (await sign(path)).url;
 const RETRY = [2_000, 8_000, 30_000, 120_000]; // ограниченные повторы с нарастающей паузой
 
 // Подписанная ссылка обновляется заранее, пока открыта страница
-export function useSignedUrl(path?: string | null) {
+export function useSignedUrl(path?: string | null, bucket = BUCKET) {
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
     if (!path) { setUrl(null); return; }
     let dead = false, t = 0, tries = 0;
     const run = async () => {
-      const r = await sign(path);
+      const r = await sign(path, bucket);
       if (dead) return;
       setUrl(r.url);
       if (r.ok) { tries = 0; t = window.setTimeout(run, (TTL - 300) * 1000); }
@@ -33,7 +34,7 @@ export function useSignedUrl(path?: string | null) {
     };
     run();
     return () => { dead = true; clearTimeout(t); };
-  }, [path]);
+  }, [path, bucket]);
   return path ? url : null;
 }
 
