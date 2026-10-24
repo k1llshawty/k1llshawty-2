@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowLeft, MessageSquare, Search, SendHorizontal } from "lucide-react";
 import { supabase, type Profile } from "./supabase";
-import { Avatar, fmtChatTime, fmtClock, type Nav } from "./ui";
+import { Avatar, OnlineContext, fmtChatTime, fmtClock, type Nav } from "./ui";
 
 type Row = { conversation_id: string; other_id: string; last_body: string | null; last_at: string | null; last_sender: string | null; unread: number };
 type Msg = { id: number; conversation_id: string; sender_id: string; body: string; created_at: string };
@@ -21,6 +21,7 @@ export default function Chats({ me, chatId, setChatId, nav }: { me: Profile; cha
   const openRef = useRef(chatId), peersRef = useRef(peers), timer = useRef(0);
   const box = useRef<HTMLDivElement>(null), ta = useRef<HTMLTextAreaElement>(null);
   const atBottom = useRef(true), prevH = useRef<number | null>(null);
+  const baseId = useRef(0), online = useContext(OnlineContext);
   openRef.current = chatId; peersRef.current = peers;
 
   const loadList = useCallback(async () => {
@@ -35,18 +36,25 @@ export default function Chats({ me, chatId, setChatId, nav }: { me: Profile; cha
     setRows(list); setListState("ready");
   }, []);
   const refreshSoon = useCallback(() => { clearTimeout(timer.current); timer.current = window.setTimeout(loadList, 300); }, [loadList]);
-  const markRead = useCallback((cid: string, ts: string) => {
-    supabase.from("conversation_members").update({ last_read_at: ts }).eq("conversation_id", cid).eq("user_id", me.id).then(() => refreshSoon());
-  }, [me.id, refreshSoon]);
+  // Прочтение хранится на сервере (conversation_members.last_read_at), счётчик берётся из базы
+  const markRead = useCallback((cid: string) => {
+    if (document.hidden) return;
+    supabase.rpc("mark_chat_read", { p_cid: cid }).then(({ error }) => { if (error) console.error("mark_chat_read:", error); refreshSoon(); });
+  }, [refreshSoon]);
+  useEffect(() => {
+    const v = () => { if (!document.hidden && openRef.current) markRead(openRef.current); };
+    document.addEventListener("visibilitychange", v);
+    return () => document.removeEventListener("visibilitychange", v);
+  }, [markRead]);
 
   useEffect(() => { loadList(); }, [loadList]);
-  // Одна Realtime-подписка живёт, пока открыт раздел Chats, и снимается при уходе
+  // Одна Realtime-подписка живёт, пока открыт раздел «Чаты», и снимается при уходе
   useEffect(() => {
     const ch = supabase.channel("msgs-" + me.id).on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, (payload) => {
       const m = payload.new as Msg;
       if (m.conversation_id === openRef.current) {
         setMsgs((p) => (p.some((x) => x.id === m.id) ? p : [...p, m]));
-        if (m.sender_id !== me.id) markRead(m.conversation_id, m.created_at);
+        if (m.sender_id !== me.id) markRead(m.conversation_id);
       }
       refreshSoon();
     }).subscribe();
@@ -62,8 +70,9 @@ export default function Chats({ me, chatId, setChatId, nav }: { me: Profile; cha
       if (dead) return;
       if (error) return setMsgState("error");
       const list = ((data ?? []) as Msg[]).reverse();
+      baseId.current = list.length ? list[list.length - 1].id : 0;
       setMsgs(list); setOlder((data ?? []).length === PAGE); setMsgState("ready");
-      if (list.length) markRead(chatId, list[list.length - 1].created_at);
+      markRead(chatId);
     });
     return () => { dead = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -111,7 +120,7 @@ export default function Chats({ me, chatId, setChatId, nav }: { me: Profile; cha
           {shown.map((r) => { const p = peers[r.other_id]; return (
             <li key={r.conversation_id}>
               <button className={"chat-row" + (r.conversation_id === chatId ? " on" : "")} onClick={() => setChatId(r.conversation_id)}>
-                <Avatar name={p?.display_name ?? "?"} size={48} path={p?.avatar_path} />
+                <Avatar name={p?.display_name ?? "?"} size={48} path={p?.avatar_path} uid={p?.id} />
                 <span className="cr-main">
                   <span className="cr-top"><strong>{p?.display_name ?? "…"}</strong>{r.last_at && <time className="dim">{fmtChatTime(r.last_at)}</time>}</span>
                   <span className="cr-bot"><span className="cr-prev muted">{r.last_body ? (r.last_sender === me.id ? "Вы: " : "") + r.last_body : "Нет сообщений"}</span>{r.unread > 0 && <b className="badge">{r.unread > 99 ? "99+" : r.unread}</b>}</span>
@@ -126,8 +135,8 @@ export default function Chats({ me, chatId, setChatId, nav }: { me: Profile; cha
             <header className="chat-head">
               <button className="icon-btn back" onClick={() => setChatId(null)} aria-label="К списку чатов"><ArrowLeft size={20} strokeWidth={1.75} /></button>
               <button className="ch-who" onClick={() => peer && nav.goProfile(peer)} disabled={!peer}>
-                <Avatar name={peer?.display_name ?? "?"} size={40} path={peer?.avatar_path} />
-                <span className="cr-main"><strong>{peer?.display_name ?? "…"}</strong><span className="dim small">{peer ? "@" + peer.username : ""}</span></span>
+                <Avatar name={peer?.display_name ?? "?"} size={40} path={peer?.avatar_path} uid={peer?.id} />
+                <span className="cr-main"><strong>{peer?.display_name ?? "…"}</strong><span className={"small " + (peer && online.has(peer.id) ? "on-txt" : "dim")}>{peer ? (online.has(peer.id) ? "В сети" : "@" + peer.username) : ""}</span></span>
               </button>
             </header>
             <div className="msgs" ref={box} onScroll={(e) => { const t = e.currentTarget; atBottom.current = t.scrollHeight - t.scrollTop - t.clientHeight < 80; }}>
@@ -136,7 +145,7 @@ export default function Chats({ me, chatId, setChatId, nav }: { me: Profile; cha
               {msgState === "error" && <div className="empty-in"><p className="err">Не удалось загрузить сообщения.</p></div>}
               {msgState === "ready" && !msgs.length && <p className="dim small center-t">Сообщений пока нет. Напишите первым.</p>}
               {msgs.map((m) => (
-                <div key={m.id} className={"bubble " + (m.sender_id === me.id ? "out" : "in")}><span>{m.body}</span><time>{fmtClock(m.created_at)}</time></div>
+                <div key={m.id} className={"bubble " + (m.sender_id === me.id ? "out" : "in") + (m.id > baseId.current ? " fresh" : "")}><span>{m.body}</span><time>{fmtClock(m.created_at)}</time></div>
               ))}
             </div>
             <div className="composer-wrap">

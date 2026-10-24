@@ -24,14 +24,14 @@ export default function Explore({ me, nav }: { me: Profile; nav: Nav }) {
   }, [q, me.id]);
   return (
     <div className="col">
-      <header className="topbar"><h2>Explore</h2></header>
+      <header className="topbar"><h2>Поиск</h2></header>
       <div className="search"><Search size={16} strokeWidth={1.75} /><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Имя или username" aria-label="Поиск людей" autoCapitalize="none" /></div>
       {state === "loading" && <div className="skel" />}
       {state === "error" && <div className="empty-in"><p className="err">Не удалось выполнить поиск.</p></div>}
       {state === "ready" && !res.length && <div className="empty-in"><p className="muted">{q.trim() ? "Никого не найдено." : "Пока здесь только вы."}</p></div>}
       {state === "ready" && <ul className="chat-list">{res.map((p) => (
         <li key={p.id}><button className="chat-row" onClick={() => nav.goProfile(p)}>
-          <Avatar name={p.display_name} size={46} path={p.avatar_path} />
+          <Avatar name={p.display_name} size={46} path={p.avatar_path} uid={p.id} />
           <span className="cr-main"><strong>{p.display_name}</strong><span className="muted small">@{p.username}</span></span>
         </button></li>))}</ul>}
     </div>

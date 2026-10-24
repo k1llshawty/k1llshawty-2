@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useContext, useEffect, useMemo, useState, type FormEvent } from "react";
 import { MessageSquare, Rss, Search, User, LogOut, Pencil, Camera, Circle, Snowflake, Ghost, Info, Calendar, Palette, Lock, ArrowLeft, MessageCircle } from "lucide-react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase, type Profile } from "./supabase";
@@ -9,11 +9,11 @@ import ImageEditor from "./ImageEditor";
 import Chats from "./Chats";
 import Explore from "./Explore";
 import Feed from "./Feed";
-import { Avatar, fmtDateTime, type Nav, type Tab } from "./ui";
+import { Avatar, OnlineContext, fmtDateTime, type Nav, type Tab } from "./ui";
 
 const TABS: { id: Tab; label: string; Icon: typeof User }[] = [
-  { id: "chats", label: "Chats", Icon: MessageSquare }, { id: "feed", label: "Feed", Icon: Rss },
-  { id: "explore", label: "Explore", Icon: Search }, { id: "profile", label: "Profile", Icon: User },
+  { id: "chats", label: "Чаты", Icon: MessageSquare }, { id: "feed", label: "Лента", Icon: Rss },
+  { id: "explore", label: "Поиск", Icon: Search }, { id: "profile", label: "Профиль", Icon: User },
 ];
 
 export default function App() {
@@ -29,9 +29,9 @@ export default function App() {
 }
 
 const THEMES = [
-  { id: "default", label: "Default", Icon: Circle, locked: false },
-  { id: "winter", label: "Winter", Icon: Snowflake, locked: true },
-  { id: "halloween", label: "Halloween", Icon: Ghost, locked: true },
+  { id: "default", label: "По умолчанию", Icon: Circle, locked: false },
+  { id: "winter", label: "Зима", Icon: Snowflake, locked: true },
+  { id: "halloween", label: "Хэллоуин", Icon: Ghost, locked: true },
 ];
 function ThemeSwitch({ compact }: { compact?: boolean }) {
   const [open, setOpen] = useState(false);
@@ -41,7 +41,7 @@ function ThemeSwitch({ compact }: { compact?: boolean }) {
     <div className="menu-wrap" onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setOpen(false); }}>
       {compact
         ? <button className="icon-btn" title="Оформление" aria-label="Оформление" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen(!open)}><Palette size={20} strokeWidth={1.75} /></button>
-        : <button className="btn menu-btn" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen(!open)}><Circle size={15} strokeWidth={1.75} />Default</button>}
+        : <button className="btn menu-btn" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen(!open)}><Circle size={15} strokeWidth={1.75} />По умолчанию</button>}
       {open && <ul className={"menu" + (compact ? " side" : "")} role="listbox" aria-label="Оформление">
         {THEMES.map(({ id, label, Icon, locked }) => (
           <li key={id}><button role="option" aria-selected={!locked} aria-disabled={locked} className={locked ? "locked" : "on"} onClick={() => (locked ? soon() : (applyTheme("default", true), setOpen(false)))}>
@@ -61,6 +61,19 @@ function Shell({ session }: { session: Session }) {
   useEffect(() => {
     supabase.from("profiles").select("*").eq("id", session.user.id).single()
       .then(({ data, error }) => { if (error) setLoadErr(true); else setMe(data as Profile); });
+  }, [session.user.id]);
+
+  const [online, setOnline] = useState<Set<string>>(new Set());
+  // Один общий приватный канал присутствия на всё приложение; ключ — id пользователя
+  useEffect(() => {
+    const ch = supabase.channel("presence:app", { config: { private: true, presence: { key: session.user.id } } });
+    const sync = () => setOnline(new Set(Object.keys(ch.presenceState())));
+    ch.on("presence", { event: "sync" }, sync).on("presence", { event: "join" }, sync).on("presence", { event: "leave" }, sync)
+      .subscribe(async (status) => {
+        if (status === "SUBSCRIBED") await ch.track({ at: Date.now() });
+        else if (status === "CLOSED" || status === "CHANNEL_ERROR" || status === "TIMED_OUT") setOnline(new Set());
+      });
+    return () => { setOnline(new Set()); supabase.removeChannel(ch); };
   }, [session.user.id]);
 
   const startChat = useCallback(async (userId: string) => {
@@ -85,6 +98,7 @@ function Shell({ session }: { session: Session }) {
   else main = <Explore me={me} nav={nav} />;
 
   return (
+    <OnlineContext.Provider value={online}>
     <div className={"shell" + (chatOpen ? " chat-open" : "")}>
       <nav className="rail" aria-label="Разделы">
         <div className="rail-brand" title="k1llshawty.exe">k1</div>
@@ -96,6 +110,7 @@ function Shell({ session }: { session: Session }) {
       </nav>
       <main className={"view" + (tab === "chats" && !viewing ? " flush" : "")}>{main}</main>
     </div>
+    </OnlineContext.Provider>
   );
 }
 
@@ -140,6 +155,7 @@ function ProfilePage({ profile, isOwn, nav, onSaved, onBack }: { profile: Profil
   const [err, setErr] = useState<string | null>(null);
   const [editor, setEditor] = useState<"avatar" | "cover" | null>(null);
   const [opening, setOpening] = useState(false);
+  const isOnline = useContext(OnlineContext).has(profile.id);
 
   const start = () => { setF({ display_name: profile.display_name, username: profile.username, bio: profile.bio }); setErr(null); setEditing(true); };
   async function write() {
@@ -150,7 +166,7 @@ function ProfilePage({ profile, isOwn, nav, onSaved, onBack }: { profile: Profil
   async function save(e: FormEvent) {
     e.preventDefault(); setErr(null);
     const username = f.username.trim().toLowerCase(), display_name = f.display_name.trim();
-    if (!/^[a-z0-9_]{3,20}$/.test(username)) return setErr("Username: 3–20 символов, a–z, 0–9 и _.");
+    if (!/^[a-z0-9_]{3,20}$/.test(username)) return setErr("Имя пользователя: 3–20 символов, a–z, 0–9 и _.");
     if (!display_name) return setErr("Введите отображаемое имя.");
     setBusy(true);
     const { data, error } = await supabase.from("profiles").update({ username, display_name, bio: f.bio.trim() }).eq("id", profile.id).select().single();
@@ -166,7 +182,7 @@ function ProfilePage({ profile, isOwn, nav, onSaved, onBack }: { profile: Profil
         <div className="p-top">
           <div className="p-avatar">
             {isOwn ? <button className="av-btn" onClick={() => setEditor("avatar")} aria-label="Изменить аватар"><Avatar name={profile.display_name} size={104} path={profile.avatar_path} /><span className="av-cam"><Camera size={20} strokeWidth={1.75} /></span></button>
-              : <Avatar name={profile.display_name} size={104} path={profile.avatar_path} />}
+              : <Avatar name={profile.display_name} size={104} path={profile.avatar_path} uid={profile.id} />}
           </div>
           {isOwn && !editing && <button className="btn p-edit" onClick={start}><Pencil size={15} strokeWidth={1.75} />Редактировать</button>}
           {!isOwn && <button className="btn primary p-edit" onClick={write} disabled={opening}><MessageCircle size={15} strokeWidth={1.75} />{opening ? "Открываю…" : "Написать"}</button>}
@@ -174,7 +190,7 @@ function ProfilePage({ profile, isOwn, nav, onSaved, onBack }: { profile: Profil
         {editing ? (
           <form onSubmit={save} className="stack p-form">
             <label>Отображаемое имя<input value={f.display_name} maxLength={40} onChange={(e) => setF({ ...f, display_name: e.target.value })} /></label>
-            <label>Username<input value={f.username} maxLength={20} autoCapitalize="none" spellCheck={false} onChange={(e) => setF({ ...f, username: e.target.value })} /></label>
+            <label>Имя пользователя<input value={f.username} maxLength={20} autoCapitalize="none" spellCheck={false} onChange={(e) => setF({ ...f, username: e.target.value })} /></label>
             <label>О себе<textarea value={f.bio} maxLength={200} rows={3} onChange={(e) => setF({ ...f, bio: e.target.value })} /></label>
             {err && <p className="err" role="alert">{err}</p>}
             <div className="row">
@@ -183,7 +199,7 @@ function ProfilePage({ profile, isOwn, nav, onSaved, onBack }: { profile: Profil
             </div>
           </form>
         ) : (<>
-          <div className="p-info"><h1>{profile.display_name}</h1><p className="p-user">@{profile.username}</p></div>
+          <div className="p-info"><h1>{profile.display_name}</h1><p className="p-user">@{profile.username}</p>{!isOwn && isOnline && <p className="on-txt small">В сети</p>}</div>
           {err && <p className="err" role="alert">{err}</p>}
           <ul className="info">
             {profile.bio && <li><Info size={20} strokeWidth={1.5} /><div><p className="p-bio">{profile.bio}</p><span>О себе</span></div></li>}

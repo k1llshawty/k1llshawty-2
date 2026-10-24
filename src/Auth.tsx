@@ -9,7 +9,7 @@ export function Wordmark({ big }: { big?: boolean }) {
 
 async function signIn(username: string, password: string) {
   const u = username.trim().toLowerCase();
-  const bad = "Неверный username или пароль.";
+  const bad = "Неверное имя пользователя или пароль.";
   if (!UNAME.test(u)) return bad;
   const { data: email, error: e1 } = await supabase.rpc("resolve_login", { p_username: u });
   if (e1) return "Нет связи с сервером. Попробуйте ещё раз.";
@@ -30,7 +30,7 @@ export default function Auth() {
     setErr(null);
     if (!configured) return setErr("Не заполнен файл src/config.ts (адрес и ключ Supabase).");
     const username = f.username.trim().toLowerCase();
-    if (!UNAME.test(username)) return setErr("Username: 3–20 символов, a–z, 0–9 и _.");
+    if (!UNAME.test(username)) return setErr("Имя пользователя: 3–20 символов, a–z, 0–9 и _.");
     if (mode === "up" && f.password.length < 8) return setErr("Пароль: минимум 8 символов.");
     setBusy(true);
     if (mode === "up") {
@@ -56,7 +56,7 @@ export default function Auth() {
         <Wordmark big />
         <p className="muted">{mode === "in" ? "Закрытый мессенджер. Вход по username." : "Регистрация только по одноразовому инвайт-коду."}</p>
         {mode === "up" && <label>Инвайт-код<input value={f.invite} onChange={set("invite")} placeholder="XXXX-XXXX-XXXX-XXXX" autoCapitalize="characters" autoComplete="off" spellCheck={false} /></label>}
-        <label>Username<input value={f.username} onChange={set("username")} autoComplete="username" autoCapitalize="none" spellCheck={false} /></label>
+        <label>Имя пользователя<input value={f.username} onChange={set("username")} autoComplete="username" autoCapitalize="none" spellCheck={false} /></label>
         {mode === "up" && <label>Отображаемое имя <span className="muted">(необязательно)</span><input value={f.display} onChange={set("display")} maxLength={40} /></label>}
         <label>Пароль<input type="password" value={f.password} onChange={set("password")} autoComplete={mode === "in" ? "current-password" : "new-password"} /></label>
         {err && <p className="err" role="alert">{err}</p>}

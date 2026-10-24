@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Heart, MessageCircle, Trash2 } from "lucide-react";
 import { supabase, type Profile } from "./supabase";
-import { Avatar, fmtDateTime, type Nav } from "./ui";
+import { Avatar, attachAuthors, fmtDateTime, type Nav } from "./ui";
 
 type PostRow = { id: string; body: string; created_at: string; author_id: string; author: Profile; post_likes: { count: number }[]; comments: { count: number }[] };
 type Cm = { id: string; body: string; created_at: string; author_id: string; author: Profile };
 const PAGE = 20;
 
-function PostCard({ post, liked0, me, nav, onDelete }: { post: PostRow; liked0: boolean; me: Profile; nav: Nav; onDelete: (id: string) => void }) {
+function PostCard({ post, liked0, me, nav, onDelete, fresh }: { post: PostRow; liked0: boolean; me: Profile; nav: Nav; onDelete: (id: string) => void; fresh: boolean }) {
   const [liked, setLiked] = useState(liked0), [likes, setLikes] = useState(post.post_likes[0]?.count ?? 0);
   const [cc, setCc] = useState(post.comments[0]?.count ?? 0), [open, setOpen] = useState(false);
   const [cms, setCms] = useState<Cm[]>([]), [cState, setCState] = useState<"idle" | "loading" | "error">("idle");
@@ -23,18 +23,18 @@ function PostCard({ post, liked0, me, nav, onDelete }: { post: PostRow; liked0: 
   }
   async function loadCms() {
     setCState("loading");
-    const { data, error } = await supabase.from("comments").select("id,body,created_at,author_id,author:profiles(*)").eq("post_id", post.id).order("created_at").limit(100);
-    if (error) return setCState("error");
-    setCms((data ?? []) as unknown as Cm[]); setCState("idle");
+    const { data, error } = await supabase.from("comments").select("id,body,created_at,author_id").eq("post_id", post.id).order("created_at").limit(100);
+    if (error) { console.error(error); return setCState("error"); }
+    setCms(await attachAuthors((data ?? []) as Omit<Cm, "author">[])); setCState("idle");
   }
   const toggleCms = () => { if (!open) loadCms(); setOpen(!open); };
   async function addCm() {
     const body = text.trim(); if (!body || busy) return;
     setBusy(true); setErr(null);
-    const { data, error } = await supabase.from("comments").insert({ post_id: post.id, body }).select("id,body,created_at,author_id,author:profiles(*)").single();
+    const { data, error } = await supabase.from("comments").insert({ post_id: post.id, body }).select("id,body,created_at,author_id").single();
     setBusy(false);
-    if (error || !data) return setErr("Не удалось отправить комментарий.");
-    setCms((p) => [...p, data as unknown as Cm]); setCc((n) => n + 1); setText("");
+    if (error || !data) { console.error(error); return setErr("Не удалось отправить комментарий. Попробуйте ещё раз."); }
+    setCms((p) => [...p, { ...data, author: me }]); setCc((n) => n + 1); setText("");
   }
   async function delCm(id: string) {
     const { error } = await supabase.from("comments").delete().eq("id", id);
@@ -47,8 +47,8 @@ function PostCard({ post, liked0, me, nav, onDelete }: { post: PostRow; liked0: 
   }
   const a = post.author;
   return (
-    <li className="pcard">
-      <button className="pc-av" onClick={() => nav.goProfile(a)} aria-label={a.display_name}><Avatar name={a.display_name} size={42} path={a.avatar_path} /></button>
+    <li className={"pcard" + (fresh ? " fresh" : "")}>
+      <button className="pc-av" onClick={() => nav.goProfile(a)} aria-label={a.display_name}><Avatar name={a.display_name} size={42} path={a.avatar_path} uid={a.id} /></button>
       <div className="pc-main">
         <p className="post-meta"><button className="pc-name" onClick={() => nav.goProfile(a)}>{a.display_name}</button><span className="muted">@{a.username}</span><time className="dim">{fmtDateTime(post.created_at)}</time></p>
         <p className="post-body">{post.body}</p>
@@ -79,10 +79,11 @@ export default function Feed({ me, nav }: { me: Profile; nav: Nav }) {
   const [posts, setPosts] = useState<PostRow[]>([]), [liked, setLiked] = useState<Set<string>>(new Set());
   const [state, setState] = useState<"loading" | "ready" | "error">("loading"), [more, setMore] = useState(false);
   const [draft, setDraft] = useState(""), [posting, setPosting] = useState(false), [err, setErr] = useState<string | null>(null);
+  const [fresh, setFresh] = useState<string | null>(null);
   const load = useCallback(async (from: number) => {
-    const { data, error } = await supabase.from("posts").select("id,body,created_at,author_id,author:profiles(*),post_likes(count),comments(count)").order("created_at", { ascending: false }).range(from, from + PAGE - 1);
-    if (error) return setState("error");
-    const list = (data ?? []) as unknown as PostRow[];
+    const { data, error } = await supabase.from("posts").select("id,body,created_at,author_id,post_likes(count),comments(count)").order("created_at", { ascending: false }).range(from, from + PAGE - 1);
+    if (error) { console.error(error); return setState("error"); }
+    const list = await attachAuthors((data ?? []) as Omit<PostRow, "author">[]);
     if (list.length) {
       const { data: l } = await supabase.from("post_likes").select("post_id").eq("user_id", me.id).in("post_id", list.map((p) => p.id));
       setLiked((s) => new Set([...s, ...(l ?? []).map((x) => x.post_id as string)]));
@@ -94,14 +95,18 @@ export default function Feed({ me, nav }: { me: Profile; nav: Nav }) {
   async function publish() {
     const body = draft.trim(); if (!body || posting) return;
     setPosting(true); setErr(null);
-    const { data, error } = await supabase.from("posts").insert({ body }).select("id,body,created_at,author_id,author:profiles(*),post_likes(count),comments(count)").single();
+    const { data, error } = await supabase.from("posts").insert({ body }).select("id,body,created_at,author_id").single();
     setPosting(false);
-    if (error || !data) return setErr("Не удалось опубликовать. Попробуйте ещё раз.");
-    setPosts((p) => [data as unknown as PostRow, ...p]); setDraft("");
+    if (error || !data) {
+      console.error(error);
+      return setErr(error?.code === "42501" ? "Нет прав на запись в базе данных. Нужно выполнить обновление базы (миграция 0004)." : "Не удалось опубликовать. Проверьте соединение и попробуйте ещё раз.");
+    }
+    const row: PostRow = { ...data, author: me, post_likes: [{ count: 0 }], comments: [{ count: 0 }] };
+    setFresh(row.id); setPosts((p) => [row, ...p]); setDraft("");
   }
   return (
     <div className="col">
-      <header className="topbar"><h2>Feed</h2></header>
+      <header className="topbar"><h2>Лента</h2></header>
       <div className="compose">
         <Avatar name={me.display_name} size={42} path={me.avatar_path} />
         <div className="stack">
@@ -113,7 +118,7 @@ export default function Feed({ me, nav }: { me: Profile; nav: Nav }) {
       {state === "loading" && <div className="skel" />}
       {state === "error" && <div className="empty-in"><p className="err">Не удалось загрузить ленту.</p><button className="btn" onClick={() => { setState("loading"); load(0); }}>Повторить</button></div>}
       {state === "ready" && !posts.length && <div className="empty-in"><h2>Здесь пока тихо</h2><p className="muted">Опубликуйте первую запись.</p></div>}
-      <ul className="posts">{posts.map((p) => <PostCard key={p.id} post={p} liked0={liked.has(p.id)} me={me} nav={nav} onDelete={(id) => setPosts((l) => l.filter((x) => x.id !== id))} />)}</ul>
+      <ul className="posts">{posts.map((p) => <PostCard key={p.id} post={p} liked0={liked.has(p.id)} fresh={p.id === fresh} me={me} nav={nav} onDelete={(id) => setPosts((l) => l.filter((x) => x.id !== id))} />)}</ul>
       {more && <button className="btn center" onClick={() => load(posts.length)}>Показать ещё</button>}
     </div>
   );
