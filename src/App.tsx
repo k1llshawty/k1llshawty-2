@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useMemo, useState, type FormEvent } from "react";
-import { MessageSquare, Rss, Search, User, LogOut, Pencil, Camera, Circle, Snowflake, Ghost, Info, Calendar, Palette, Lock, ArrowLeft, MessageCircle } from "lucide-react";
+import { MessageSquare, Rss, Search, User, LogOut, Pencil, Camera, Circle, Snowflake, Ghost, Info, Calendar, Palette, Lock, ArrowLeft, MessageCircle, ShieldCheck } from "lucide-react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase, type Profile } from "./supabase";
 import Auth, { Wordmark } from "./Auth";
@@ -9,7 +9,8 @@ import ImageEditor from "./ImageEditor";
 import Chats from "./Chats";
 import Explore from "./Explore";
 import Feed from "./Feed";
-import { Avatar, OnlineContext, fmtDateTime, type Nav, type Tab } from "./ui";
+import Admin from "./Admin";
+import { Avatar, Badges, OnlineContext, fmtDateTime, lastSeenText, signOutClean, useBadges, type Nav, type Tab } from "./ui";
 
 const TABS: { id: Tab; label: string; Icon: typeof User }[] = [
   { id: "chats", label: "Чаты", Icon: MessageSquare }, { id: "feed", label: "Лента", Icon: Rss },
@@ -28,6 +29,7 @@ export default function App() {
   return session ? <Shell session={session} /> : <Auth />;
 }
 
+const ADMIN_TAB = { id: "admin" as Tab, label: "Админ", Icon: ShieldCheck };
 const THEMES = [
   { id: "default", label: "По умолчанию", Icon: Circle, locked: false },
   { id: "winter", label: "Зима", Icon: Snowflake, locked: true },
@@ -58,6 +60,13 @@ function Shell({ session }: { session: Session }) {
   const [viewing, setViewing] = useState<Profile | null>(null);
   const [chatId, setChatId] = useState<string | null>(null);
   const [loadErr, setLoadErr] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [longBio, setLongBio] = useState(false);
+  useEffect(() => {
+    // Роль берётся из базы (RLS отдаёт строку только самому администратору); интерфейс лишь отражает её
+    supabase.from("admins").select("user_id").eq("user_id", session.user.id).maybeSingle().then(({ data }) => setIsAdmin(!!data));
+    supabase.from("user_perks").select("long_bio").eq("user_id", session.user.id).maybeSingle().then(({ data }) => setLongBio(!!data?.long_bio));
+  }, [session.user.id]);
   useEffect(() => {
     supabase.from("profiles").select("*").eq("id", session.user.id).single()
       .then(({ data, error }) => { if (error) setLoadErr(true); else setMe(data as Profile); });
@@ -67,13 +76,24 @@ function Shell({ session }: { session: Session }) {
   // Один общий приватный канал присутствия на всё приложение; ключ — id пользователя
   useEffect(() => {
     const ch = supabase.channel("presence:app", { config: { private: true, presence: { key: session.user.id } } });
+    let last = 0;
+    const touch = (force = false) => {
+      if (!force && Date.now() - last < 120_000) return;
+      last = Date.now();
+      supabase.rpc("touch_last_seen").then(({ error }) => { if (error) console.error("touch_last_seen:", error); });
+    };
     const sync = () => setOnline(new Set(Object.keys(ch.presenceState())));
     ch.on("presence", { event: "sync" }, sync).on("presence", { event: "join" }, sync).on("presence", { event: "leave" }, sync)
       .subscribe(async (status) => {
-        if (status === "SUBSCRIBED") await ch.track({ at: Date.now() });
+        if (status === "SUBSCRIBED") { await ch.track({ at: Date.now() }); touch(true); }
         else if (status === "CLOSED" || status === "CHANNEL_ERROR" || status === "TIMED_OUT") setOnline(new Set());
       });
-    return () => { setOnline(new Set()); supabase.removeChannel(ch); };
+    // Время визита пишем не чаще раза в 2 минуты, а также при скрытии страницы
+    const iv = window.setInterval(() => { if (!document.hidden) touch(); }, 120_000);
+    const vis = () => touch(document.hidden);
+    const hide = () => touch(true);
+    document.addEventListener("visibilitychange", vis); window.addEventListener("pagehide", hide);
+    return () => { clearInterval(iv); document.removeEventListener("visibilitychange", vis); window.removeEventListener("pagehide", hide); setOnline(new Set()); supabase.removeChannel(ch); };
   }, [session.user.id]);
 
   const startChat = useCallback(async (userId: string) => {
@@ -89,11 +109,13 @@ function Shell({ session }: { session: Session }) {
   if (loadErr) return <div className="boot"><p className="err">Не удалось загрузить профиль.</p><button className="btn" onClick={() => supabase.auth.signOut()}>Выйти</button></div>;
   if (!me) return <div className="boot"><Wordmark big /></div>;
 
+  const tabs = isAdmin ? [...TABS, ADMIN_TAB] : TABS;
   const chatOpen = tab === "chats" && !!chatId && !viewing;
   let main;
   if (viewing && viewing.id !== me.id) main = <ProfilePage key={viewing.id} profile={viewing} isOwn={false} nav={nav} onBack={() => setViewing(null)} />;
-  else if (viewing || tab === "profile") main = <ProfilePage profile={me} isOwn nav={nav} onSaved={setMe} onBack={viewing ? () => setViewing(null) : undefined} />;
+  else if (viewing || tab === "profile") main = <ProfilePage profile={me} isOwn nav={nav} onSaved={setMe} bioMax={longBio ? 1000 : 200} onBack={viewing ? () => setViewing(null) : undefined} />;
   else if (tab === "chats") main = <Chats me={me} chatId={chatId} setChatId={setChatId} nav={nav} />;
+  else if (tab === "admin" && isAdmin) main = <Admin />;
   else if (tab === "feed") main = <Feed me={me} nav={nav} />;
   else main = <Explore me={me} nav={nav} />;
 
@@ -102,8 +124,8 @@ function Shell({ session }: { session: Session }) {
     <div className={"shell" + (chatOpen ? " chat-open" : "")}>
       <nav className="rail" aria-label="Разделы">
         <div className="rail-brand" title="k1llshawty.exe">k1</div>
-        {TABS.map(({ id, label, Icon }) => (
-          <button key={id} className={"rail-item" + (tab === id && !viewing ? " on" : "")} onClick={() => nav.goTab(id)} aria-current={tab === id && !viewing ? "page" : undefined}>
+        {tabs.map(({ id, label, Icon }) => (
+          <button key={id} title={id === "admin" ? "Администрирование" : undefined} aria-label={id === "admin" ? "Администрирование" : undefined} className={"rail-item" + (tab === id && !viewing ? " on" : "")} onClick={() => nav.goTab(id)} aria-current={tab === id && !viewing ? "page" : undefined}>
             {id === "profile" ? <Avatar name={me.display_name} size={26} path={me.avatar_path} /> : <Icon size={22} strokeWidth={1.75} />}<span>{label}</span>
           </button>))}
         <div className="rail-foot only-wide"><ThemeSwitch compact /></div>
@@ -148,7 +170,7 @@ function Cover({ profile, isOwn, onEdit, onBack }: { profile: Profile; isOwn: bo
     </div>);
 }
 
-function ProfilePage({ profile, isOwn, nav, onSaved, onBack }: { profile: Profile; isOwn: boolean; nav: Nav; onSaved?: (p: Profile) => void; onBack?: () => void }) {
+function ProfilePage({ profile, isOwn, nav, onSaved, onBack, bioMax = 200 }: { profile: Profile; isOwn: boolean; nav: Nav; onSaved?: (p: Profile) => void; onBack?: () => void; bioMax?: number }) {
   const [editing, setEditing] = useState(false);
   const [f, setF] = useState({ display_name: profile.display_name, username: profile.username, bio: profile.bio });
   const [busy, setBusy] = useState(false);
@@ -156,6 +178,13 @@ function ProfilePage({ profile, isOwn, nav, onSaved, onBack }: { profile: Profil
   const [editor, setEditor] = useState<"avatar" | "cover" | null>(null);
   const [opening, setOpening] = useState(false);
   const isOnline = useContext(OnlineContext).has(profile.id);
+  const [seen, setSeen] = useState(profile.last_seen_at);
+  const badges = useBadges(profile.id);
+  useEffect(() => {
+    setSeen(profile.last_seen_at);
+    if (isOwn || isOnline) return;
+    supabase.from("profiles").select("last_seen_at").eq("id", profile.id).single().then(({ data }) => { if (data) setSeen(data.last_seen_at as string | null); });
+  }, [profile.id, profile.last_seen_at, isOwn, isOnline]);
 
   const start = () => { setF({ display_name: profile.display_name, username: profile.username, bio: profile.bio }); setErr(null); setEditing(true); };
   async function write() {
@@ -171,27 +200,24 @@ function ProfilePage({ profile, isOwn, nav, onSaved, onBack }: { profile: Profil
     setBusy(true);
     const { data, error } = await supabase.from("profiles").update({ username, display_name, bio: f.bio.trim() }).eq("id", profile.id).select().single();
     setBusy(false);
-    if (error) return setErr(error.code === "23505" ? "Этот username уже занят." : "Не удалось сохранить. Попробуйте ещё раз.");
+    if (error) return setErr(error.code === "23505" ? "Это имя пользователя уже занято." : error.message?.includes("bio_too_long") ? "Описание слишком длинное: для вашего аккаунта лимит — 200 символов." : "Не удалось сохранить. Попробуйте ещё раз.");
     onSaved?.(data as Profile); setEditing(false);
   }
+  const status = isOnline ? "В сети" : seen ? lastSeenText(seen) : "Не в сети";
 
   return (
     <article className="profile">
       <Cover profile={profile} isOwn={isOwn} onEdit={() => setEditor("cover")} onBack={onBack} />
       <header className="p-head">
-        <div className="p-top">
-          <div className="p-avatar">
-            {isOwn ? <button className="av-btn" onClick={() => setEditor("avatar")} aria-label="Изменить аватар"><Avatar name={profile.display_name} size={104} path={profile.avatar_path} /><span className="av-cam"><Camera size={20} strokeWidth={1.75} /></span></button>
-              : <Avatar name={profile.display_name} size={104} path={profile.avatar_path} uid={profile.id} />}
-          </div>
-          {isOwn && !editing && <button className="btn p-edit" onClick={start}><Pencil size={15} strokeWidth={1.75} />Редактировать</button>}
-          {!isOwn && <button className="btn primary p-edit" onClick={write} disabled={opening}><MessageCircle size={15} strokeWidth={1.75} />{opening ? "Открываю…" : "Написать"}</button>}
+        <div className="p-avatar">
+          {isOwn ? <button className="av-btn" onClick={() => setEditor("avatar")} aria-label="Изменить аватар"><Avatar name={profile.display_name} size={96} path={profile.avatar_path} /><span className="av-cam"><Camera size={20} strokeWidth={1.75} /></span></button>
+            : <Avatar name={profile.display_name} size={96} path={profile.avatar_path} uid={profile.id} />}
         </div>
         {editing ? (
           <form onSubmit={save} className="stack p-form">
             <label>Отображаемое имя<input value={f.display_name} maxLength={40} onChange={(e) => setF({ ...f, display_name: e.target.value })} /></label>
             <label>Имя пользователя<input value={f.username} maxLength={20} autoCapitalize="none" spellCheck={false} onChange={(e) => setF({ ...f, username: e.target.value })} /></label>
-            <label>О себе<textarea value={f.bio} maxLength={200} rows={3} onChange={(e) => setF({ ...f, bio: e.target.value })} /></label>
+            <label>О себе <span className="dim">{f.bio.length}/{bioMax}</span><textarea value={f.bio} maxLength={bioMax} rows={bioMax > 200 ? 6 : 3} onChange={(e) => setF({ ...f, bio: e.target.value })} /></label>
             {err && <p className="err" role="alert">{err}</p>}
             <div className="row">
               <button className="btn primary" disabled={busy}>{busy ? "Сохраняю…" : "Сохранить"}</button>
@@ -199,8 +225,17 @@ function ProfilePage({ profile, isOwn, nav, onSaved, onBack }: { profile: Profil
             </div>
           </form>
         ) : (<>
-          <div className="p-info"><h1>{profile.display_name}</h1><p className="p-user">@{profile.username}</p>{!isOwn && isOnline && <p className="on-txt small">В сети</p>}</div>
-          {err && <p className="err" role="alert">{err}</p>}
+          <div className="p-info">
+            <h1>{profile.display_name}</h1>
+            <p className="p-user">@{profile.username}</p>
+            {!isOwn && <p className={"small " + (isOnline ? "on-txt" : "dim")}>{status}</p>}
+            <Badges list={badges} />
+          </div>
+          {err && <p className="err center-t" role="alert">{err}</p>}
+          <div className="p-actions">
+            {isOwn ? <button className="btn" onClick={start}><Pencil size={15} strokeWidth={1.75} />Редактировать профиль</button>
+              : <button className="btn primary" onClick={write} disabled={opening}><MessageCircle size={15} strokeWidth={1.75} />{opening ? "Открываю…" : "Написать"}</button>}
+          </div>
           <ul className="info">
             {profile.bio && <li><Info size={20} strokeWidth={1.5} /><div><p className="p-bio">{profile.bio}</p><span>О себе</span></div></li>}
             <li><Calendar size={20} strokeWidth={1.5} /><div><p>{new Date(profile.created_at).toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" })}</p><span>Аккаунт создан</span></div></li>
@@ -212,7 +247,7 @@ function ProfilePage({ profile, isOwn, nav, onSaved, onBack }: { profile: Profil
       {isOwn && (
         <footer className="p-foot">
           <div className="not-wide"><ThemeSwitch /></div>
-          <button className="btn" onClick={() => supabase.auth.signOut()}><LogOut size={15} strokeWidth={1.75} />Выйти</button>
+          <button className="btn" onClick={() => signOutClean()}><LogOut size={15} strokeWidth={1.75} />Выйти</button>
         </footer>)}
       {editor && <ImageEditor kind={editor} profile={profile} onClose={() => setEditor(null)} onSaved={(p) => onSaved?.(p)} />}
     </article>

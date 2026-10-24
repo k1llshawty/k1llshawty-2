@@ -7,4 +7,4 @@ export const configured = url.startsWith("https://") && !url.includes("ВАШ") 
 export const supabase = createClient(configured ? url : "https://placeholder.supabase.co", configured ? key : "placeholder", {
   auth: { persistSession: true, autoRefreshToken: true },
 });
-export type Profile = { id: string; username: string; display_name: string; bio: string; created_at: string; avatar_path: string | null; cover_path: string | null };
+export type Profile = { id: string; username: string; display_name: string; bio: string; created_at: string; avatar_path: string | null; cover_path: string | null; last_seen_at: string | null };

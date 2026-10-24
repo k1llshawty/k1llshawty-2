@@ -1,7 +1,7 @@
 import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowLeft, MessageSquare, Search, SendHorizontal } from "lucide-react";
 import { supabase, type Profile } from "./supabase";
-import { Avatar, OnlineContext, fmtChatTime, fmtClock, type Nav } from "./ui";
+import { Avatar, Badges, OnlineContext, fmtChatTime, fmtClock, lastSeenText, useBadges, type Nav } from "./ui";
 
 type Row = { conversation_id: string; other_id: string; last_body: string | null; last_at: string | null; last_sender: string | null; unread: number };
 type Msg = { id: number; conversation_id: string; sender_id: string; body: string; created_at: string };
@@ -104,6 +104,13 @@ export default function Chats({ me, chatId, setChatId, nav }: { me: Profile; cha
   }
 
   const row = rows.find((r) => r.conversation_id === chatId), peer = row ? peers[row.other_id] : undefined;
+  const peerBadges = useBadges(peer?.id);
+  const peerId = row?.other_id, peerOn = peerId ? online.has(peerId) : false;
+  // Свежее время последнего визита подтягиваем при открытии чата и когда собеседник выходит из сети
+  useEffect(() => {
+    if (!peerId || peerOn) return;
+    supabase.from("profiles").select("*").eq("id", peerId).single().then(({ data }) => { if (data) setPeers((p) => ({ ...p, [peerId]: data as Profile })); });
+  }, [peerId, peerOn]);
   const needle = q.trim().toLowerCase();
   const shown = rows.filter((r) => { const p = peers[r.other_id]; return !needle || `${p?.display_name} ${p?.username} ${r.last_body ?? ""}`.toLowerCase().includes(needle); });
 
@@ -136,7 +143,7 @@ export default function Chats({ me, chatId, setChatId, nav }: { me: Profile; cha
               <button className="icon-btn back" onClick={() => setChatId(null)} aria-label="К списку чатов"><ArrowLeft size={20} strokeWidth={1.75} /></button>
               <button className="ch-who" onClick={() => peer && nav.goProfile(peer)} disabled={!peer}>
                 <Avatar name={peer?.display_name ?? "?"} size={40} path={peer?.avatar_path} uid={peer?.id} />
-                <span className="cr-main"><strong>{peer?.display_name ?? "…"}</strong><span className={"small " + (peer && online.has(peer.id) ? "on-txt" : "dim")}>{peer ? (online.has(peer.id) ? "В сети" : "@" + peer.username) : ""}</span></span>
+                <span className="cr-main"><span className="ch-name"><strong>{peer?.display_name ?? "…"}</strong><Badges list={peerBadges} max={2} compact /></span><span className={"small " + (peerOn ? "on-txt" : "dim")}>{peer ? (peerOn ? "В сети" : peer.last_seen_at ? lastSeenText(peer.last_seen_at) : "Не в сети") : ""}</span></span>
               </button>
             </header>
             <div className="msgs" ref={box} onScroll={(e) => { const t = e.currentTarget; atBottom.current = t.scrollHeight - t.scrollTop - t.clientHeight < 80; }}>
